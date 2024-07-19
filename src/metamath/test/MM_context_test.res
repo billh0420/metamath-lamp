@@ -26,7 +26,7 @@ describe("applySingleStmt", _ => {
         let ctx = createContext(())
 
         //when
-        ctx->applySingleStmt(Const({symbols:["c1"]}))
+        ctx->applySingleStmt(Const({symbols:["c1"]}), ())
 
         //then
         assertEq( ctx->ctxSymToIntExn("c1"), -1 )
@@ -40,7 +40,7 @@ describe("applySingleStmt", _ => {
         let ctx = createContext(())
 
         //when
-        ctx->applySingleStmt(Const({symbols:["c1", "c2", "c3"]}))
+        ctx->applySingleStmt(Const({symbols:["c1", "c2", "c3"]}), ())
 
         //then
         assertEq( ctx->ctxSymToIntExn("c1"), -1 )
@@ -62,12 +62,12 @@ describe("applySingleStmt", _ => {
     it("doesn't allow to add constants in inner blocks", _ => {
         //given
         let ctx = createContext(())
-        ctx->applySingleStmt(Const({symbols:["c1", "c2"]}))
+        ctx->applySingleStmt(Const({symbols:["c1", "c2"]}), ())
         ctx->openChildContext
 
         try {
             //when
-            ctx->applySingleStmt(Const({symbols:["c3", "c4"]}))
+            ctx->applySingleStmt(Const({symbols:["c3", "c4"]}), ())
             failMsg("The line below was supposed to throw an exception.")
         } catch {
             | MmException({msg}) => {
@@ -98,7 +98,7 @@ describe("moveConstsToBegin", _ => {
         assertEq(ctx->ctxStrToIntsExn(constsToMove), [-5,-6,-12,-14,-13,-15])
 
         //when
-        ctx->moveConstsToBegin(constsToMove)
+        let ctx = ctx->ctxOptimizeForProver(~parens=constsToMove, ())
 
         //then
         assertEq(ctx->ctxStrToIntsExn(constsToMove)->Js.Array2.sortInPlace, [-1,-2,-3,-4,-5,-6])
@@ -113,7 +113,7 @@ describe("moveConstsToBegin", _ => {
         assertEq(ctx->ctxStrToIntsExn(constsToMove), [-5,-6,-12,-14,-13,-15])
 
         //when
-        ctx->moveConstsToBegin("( ) [ t ] { } abc yyy")
+        let ctx = ctx->ctxOptimizeForProver(~parens="( ) [ t ] { } abc yyy", ())
 
         //then
         assertEq(ctx->ctxStrToIntsExn(constsToMove)->Js.Array2.sortInPlace, [-1,-2,-3,-4,-5,-6])
@@ -136,7 +136,7 @@ describe("moveConstsToBegin", _ => {
         assertEq(ctx->getTypeOfVarExn(q)->ctxIntToSymExn(ctx, _), "wff")
 
         //when
-        ctx->moveConstsToBegin("( ) [ ] { }")
+        let ctx = ctx->ctxOptimizeForProver(~parens="( ) [ ] { }", ())
 
         //then
         assertEq(ctx->getTypeOfVarExn(t)->ctxIntToSymExn(ctx, _), "term")
@@ -157,7 +157,7 @@ describe("moveConstsToBegin", _ => {
         )
 
         //when
-        ctx->moveConstsToBegin("( ) [ ] { }")
+        let ctx = ctx->ctxOptimizeForProver(~parens="( ) [ ] { }", ())
 
         //then
         assertEq(

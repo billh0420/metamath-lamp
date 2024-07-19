@@ -4,7 +4,7 @@ open MM_int_test_editor_methods
 
 module Ed = MM_int_test_editor_methods
 
-describe("MM_wrk_editor integration tests", _ => {
+describe("MM_wrk_editor integration tests: proofs", _ => {
     it("prove reccot", _ => {
         setTestDataDir("prove-reccot")
         let st = createEditorState(~mmFilePath=setMmPath, ~stopAfter="reccsc", ~debug, ())
@@ -19,7 +19,7 @@ describe("MM_wrk_editor integration tests", _ => {
         let st = st->addStmtsBySearch( ~filterLabel="tanval", ~chooseLabel="tanval", () )
         assertEditorState(st, "step2")
 
-        let st = st->applySubstitution(~replaceWhat="class1", ~replaceWith="A")
+        let st = st->applySubstitution(~replaceWhat="class1", ~replaceWith="A", ~useMatching=true)
         let tanvalId = st->getStmtId(~contains="-> ( tan ` A ) = ( ( sin ` A ) / ( cos ` A ) )", ())
         assertEditorState(st, "step3")
 
@@ -27,7 +27,7 @@ describe("MM_wrk_editor integration tests", _ => {
         assertEditorState(st, "step4")
 
         let st = st->addStmtsBySearch( ~filterLabel="cotval", ~chooseLabel="cotval", () )
-        let st = st->applySubstitution(~replaceWhat="class1", ~replaceWith="A")
+        let st = st->applySubstitution(~replaceWhat="class1", ~replaceWith="A", ~useMatching=true)
         let cotvalId = st->getStmtId(~contains="-> ( cot ` A ) = ( ( cos ` A ) / ( sin ` A ) )", ())
         let st = st->unifyAll
         assertEditorState(st, "step5")
@@ -70,7 +70,8 @@ describe("MM_wrk_editor integration tests", _ => {
 
         let st = st->applySubstitution(
             ~replaceWhat="1 / ( class1 / class2 )", 
-            ~replaceWith="1 / ( ( cos ` A ) / ( sin ` A ) )"
+            ~replaceWith="1 / ( ( cos ` A ) / ( sin ` A ) )",
+            ~useMatching=true
         )
         let st = st->unifyAll
         assertEditorState(st, "step10")
@@ -84,7 +85,7 @@ describe("MM_wrk_editor integration tests", _ => {
         assertEditorState(st, "step11")
 
         let st = st->addStmtsBySearch(~filterLabel="sincl", ~chooseLabel="sincl", () )
-        let st = st->applySubstitution(~replaceWhat="class1", ~replaceWith="A")
+        let st = st->applySubstitution(~replaceWhat="class1", ~replaceWith="A", ~useMatching=true)
         let st = st->unifyAll
         assertEditorState(st, "step12")
 
@@ -240,6 +241,7 @@ describe("MM_wrk_editor integration tests", _ => {
         let st = st->applySubstitution(
             ~replaceWhat="|- sgn = ( setvar1 e. RR* |-> class1 )",
             ~replaceWith="|- sgn = ( setvar2 e. RR* |-> if ( setvar2 = 0 , 0 , if ( setvar2 < 0 , -u 1 , 1 ) ) )",
+            ~useMatching=true
         )
         assertEditorState(st, "step3")
 
@@ -249,7 +251,7 @@ describe("MM_wrk_editor integration tests", _ => {
         let st = st->unifyAll
         assertEditorState(st, "step4")
 
-        let st = st->Ed.applySubstitution( ~replaceWhat="setvar2", ~replaceWith="x" )
+        let st = st->Ed.applySubstitution( ~replaceWhat="setvar2", ~replaceWith="x", ~useMatching=true)
         let st = st->unifyAll
         assertEditorState(st, "step5")
 
@@ -306,8 +308,8 @@ describe("MM_wrk_editor integration tests", _ => {
         let st = st->unifyAll
         assertEditorState(st, "step3")
 
-        let state2Text = readEditorStateToString("step2")
-        let state3Text = readEditorStateToString("step3")
+        let state2Text = readTestFileToString("step2")
+        let state3Text = readTestFileToString("step3")
 
         assertEq(state2Text, state3Text)
 
@@ -346,7 +348,7 @@ describe("MM_wrk_editor integration tests", _ => {
         let st = st->unifyAll
         assertEditorState(st, "step1")
 
-        let st = st->applySubstitution( ~replaceWhat="class1", ~replaceWith="0", )
+        let st = st->applySubstitution( ~replaceWhat="class1", ~replaceWith="0", ~useMatching=true)
         assertEditorState(st, "step2")
 
         let (st, stmts) = st->unifyBottomUp(
@@ -379,7 +381,7 @@ describe("MM_wrk_editor integration tests", _ => {
         let st = st->unifyAll
         assertEditorState(st, "step1")
 
-        let st = st->applySubstitution(~replaceWhat="class1", ~replaceWith="5")
+        let st = st->applySubstitution(~replaceWhat="class1", ~replaceWith="5", ~useMatching=true)
         let st = st->unifyAll
         assertEditorState(st, "step2")
 
@@ -392,7 +394,7 @@ describe("MM_wrk_editor integration tests", _ => {
 
         let (st, trgtStmtId) = st->addStmt( ~label="sgn0e0", ~stmt="|- ( sgn ` 0 ) = 0", () )
         let st = st->addStmtsBySearch( ~filterLabel="sgn", ~chooseLabel="sgnval", () )
-        let st = st->applySubstitution( ~replaceWhat="class1", ~replaceWith="0", )
+        let st = st->applySubstitution( ~replaceWhat="class1", ~replaceWith="0", ~useMatching=true)
         let (st, _) = st->addStmt( ~before=st->Ed.getStmtId(~contains="|- ( 0 e. RR*", ()),
             ~stmt="|- ( ( sgn ` 0 ) = if ( 0 = 0 , 0 , if ( 0 < 0 , -u 1 , 1 ) ) <-> ( sgn ` 0 ) = 0 )", () )
         let st = st->unifyAll
@@ -414,8 +416,7 @@ describe("MM_wrk_editor integration tests", _ => {
 
     it("bottom-up prover should be able to restore missing disjoints", _ => {
         setTestDataDir("restore-missing-disjoints")
-        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", 
-            ~asrtsToSkipFilePath, ())
+        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", ())
         let st = st->deleteStmts([st->getStmtId(~label="description", ())])
         assertEditorState(st, "step1.0")
 
@@ -512,15 +513,31 @@ describe("MM_wrk_editor integration tests", _ => {
         assertEditorState(st, "step10-disj-restored")
 
     })
+    
+    it("bottom-up prover does not add unnecessary disjoints", _ => {
+        setTestDataDir("no-unnecessary-disjoints")
+        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", ())
+        let st = st->unifyAll
+        assertEditorState(st, "step0")
+
+        let (st, stmts) = st->unifyBottomUp(
+            ~stmtId=st->getStmtId(~label="vtocl2d2", ()),
+            ~maxSearchDepth=4,
+            ~allowNewStmts=false,
+            ()
+        )
+        let st = st->addNewStmts(stmts, ())
+        let st = st->unifyAll
+        assertEditorState(st, "step1")
+    })
 
     it("unify-all identifies some types of unification errors", _ => {
         setTestDataDir("identify-errors")
-        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", 
-            ~asrtsToSkipFilePath, ())
+        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", ())
         let st = st->unifyAll
         assertEditorState(st, "step1")
 
-        let st = st->updateStmt(st->getStmtId(~label="stmt11", ()), ~jstf=": cvv", ())
+        let st = st->updateStmt(st->getStmtId(~label="stmt11", ()), ~jstf=": elex", ())
         let st = st->unifyAll
         assertEditorState(st, "step2")
 
@@ -549,13 +566,13 @@ describe("MM_wrk_editor integration tests", _ => {
 
     it("unify-all identifies syntax errors", _ => {
         setTestDataDir("syntax-errors")
-        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", 
-            ~asrtsToSkipFilePath, ())
+        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", ())
         let st = st->unifyAll
         assertEditorState(st, "step1")
 
-        let st = st->updateStmt(st->getStmtId(~label="stmt9-opabex2.11", ()), ~content="|- ( A e. _V -> -> A e. _V )", ())
+        let st = st->updateStmt(st->getStmtId(~label="stmt9-opabex2.11", ()), ~content="|- ( A e. _V -> psi A e. _V )", ())
         let st = st->updateStmt(st->getStmtId(~label="stmt4", ()), ~content="|- ( ( u = x /\ v = y ) -> ( F ` u ) = ( F ` x ) ) ]", ())
+        let st = st->updateStmt(st->getStmtId(~label="stmt6.1", ()), ~content="|- ( u = x -> ( psi A ` u ) = ( psi A ` x ) )", ())
         let st = st->unifyAll
         assertEditorState(st, "step2")
 
@@ -563,8 +580,7 @@ describe("MM_wrk_editor integration tests", _ => {
 
     it("updateEditorStateWithPostupdateActions removes redundant variables from disjoints", _ => {
         setTestDataDir("no-redundant-vars-in-disj")
-        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", 
-            ~asrtsToSkipFilePath, ())
+        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", ())
         let st = st->unifyAll
         assertEditorState(st, "step1")
 
@@ -572,15 +588,35 @@ describe("MM_wrk_editor integration tests", _ => {
         let st = st->unifyAll
         assertEditorState(st, "step2")
 
-        let st = st->applySubstitution(~replaceWhat="A", ~replaceWith="width")
+        let st = st->applySubstitution(~replaceWhat="A", ~replaceWith="width", ~useMatching=true)
         let st = st->unifyAll
         assertEditorState(st, "step3")
     })
 
+    it("unify all finds required justification if more than one correct justification exist", _ => {
+        setTestDataDir("two-valid-proofs")
+        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ())
+
+        let (st, stmtId) = st->addStmt( ~jstf=": wi", ~stmt="wff ( ( ph -> ps ) -> ( ph -> ch ) )", () )
+        let st = st->unifyAll
+        assertEditorState(st, "step1")
+
+        let st = st->updateStmt(stmtId, ~jstf=": bj-0", () )
+        let st = st->unifyAll
+        assertEditorState(st, "step2")
+
+        let st = st->updateStmt(stmtId, ~jstf=": wi", () )
+        let st = st->unifyAll
+        assertEditorState(st, "step3")
+
+        let st = st->updateStmt(stmtId, ~jstf=": bj-0", () )
+        let st = st->unifyAll
+        assertEditorState(st, "step4")
+    })
+
     it("actExportProof does not export redundant elements", _ => {
         setTestDataDir("no-redundant-elems-in-export")
-        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", 
-            ~asrtsToSkipFilePath, ())
+        let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", ())
         let st = st->unifyAll
         assertEditorState(st, "step1")
         assertProof(st, st->getStmtId(~label="stmt5", ()), "proof-no-redundant-vars")
@@ -591,10 +627,155 @@ describe("MM_wrk_editor integration tests", _ => {
     it("actExportProof exports implicit local vars", _ => {
         setTestDataDir("implicit-loc-vars-in-export")
         let st = createEditorState(~mmFilePath=setMmPath, ~debug, ~editorState="editor-initial-state", 
-            ~asrtsToSkipFilePath, ~stopBefore="cvjust", ())
+            ~stopBefore="cvjust", ())
         let st = st->unifyAll
         assertEditorState(st, "step1")
         assertProof(st, st->getStmtId(~label="cvjust", ()), "cvjust")
+    })
+
+    it("findPossibleSubs is able to find substitutions by unification", _ => {
+        setTestDataDir("findPossibleSubs")
+        let st = createEditorState(~mmFilePath=setMmPath, ~stopBefore="bj-0", ~debug, ~editorState="editor-initial-state", ())
+        assertEditorState(st, "step1")
+        let ctx = st.wrkCtx->Belt_Option.getExn
+
+        let unifSubsToMap = (wrkSubs:MM_wrk_editor.wrkSubs):Belt_MapString.t<string> => {
+            wrkSubs.subs->Belt_MapInt.toArray
+                ->Js.Array2.map(((e,expr)) => (ctx->MM_context.ctxIntToSymExn(e), ctx->MM_context.ctxIntsToStrExn(expr)))
+                ->Belt_MapString.fromArray
+        }
+
+        let assertUnifSubs = (
+            ~testCaseName:string,
+            ~actualUnifSubs:result<array<MM_wrk_editor.wrkSubs>,string>, 
+            ~expectedUnifSubs:Belt_MapString.t<string>
+        ):unit => {
+            switch actualUnifSubs {
+                | Error(msg) => failMsg(`assertUnifSubs failed for '${testCaseName}': ${msg}`)
+                | Ok([wrkSubs]) => {
+                    let actualSubsMap = unifSubsToMap(wrkSubs)
+                    expectedUnifSubs->Belt_MapString.forEach((expectedVar, expectedSubExpr) => {
+                        switch actualSubsMap->Belt_MapString.get(expectedVar) {
+                            | None => failMsg(`assertUnifSubs failed for '${testCaseName}': actualSubsMap doesn't contain a substitution for ${expectedVar}`)
+                            | Some(actualSubExpr) => {
+                                assertEqMsg(
+                                    expectedVar ++ " \u2192 " ++ actualSubExpr,
+                                    expectedVar ++ " \u2192 " ++ expectedSubExpr,
+                                    `assertUnifSubs failed for '${testCaseName}'`
+                                )
+                            }
+                        }
+                    })
+                }
+                | Ok(_) => failMsg(`assertUnifSubs failed for '${testCaseName}': actualUnifSubs.length != 1`)
+            }
+        }
+        
+        let testUnifSubs = (
+            ~expr1:string,
+            ~expr2:string,
+            ~expected:array<(string,string)>
+        ):unit => {
+            assertUnifSubs(
+                ~testCaseName = expr1 ++ " <<<~>>> " ++ expr2,
+                ~actualUnifSubs = st->MM_wrk_editor_substitution.findPossibleSubs(
+                    ctx->MM_context.ctxStrToIntsExn(expr1), 
+                    ctx->MM_context.ctxStrToIntsExn(expr2), 
+                    false
+                ), 
+                ~expectedUnifSubs=expected->Belt_MapString.fromArray
+            )
+        }
+
+        testUnifSubs( ~expr1="&W1", ~expr2="ph", ~expected = [ ("&W1", "ph") ] )
+        testUnifSubs( ~expr1="|- &W1", ~expr2="|- ph", ~expected = [ ("&W1", "ph") ] )
+        testUnifSubs( ~expr1="&C1", ~expr2="A", ~expected = [ ("&C1", "A") ] )
+        testUnifSubs( ~expr1="class &C1", ~expr2="class A", ~expected = [ ("&C1", "A") ] )
+        testUnifSubs( ~expr1="&S1", ~expr2="x", ~expected = [ ("&S1", "x") ] )
+        testUnifSubs( ~expr1="setvar &S1", ~expr2="setvar x", ~expected = [ ("&S1", "x") ] )
+        testUnifSubs( ~expr1="&C1", ~expr2="x", ~expected = [ ("&C1", "x") ] )
+        testUnifSubs( ~expr1="class &C1", ~expr2="setvar x", ~expected = [ ("&C1", "x") ] )
+        testUnifSubs( ~expr1="&C1", ~expr2="&S1", ~expected = [ ("&C1", "&S1") ] )
+        testUnifSubs( ~expr1="class &C1", ~expr2="setvar &S1", ~expected = [ ("&C1", "&S1") ] )
+
+        testUnifSubs( 
+            ~expr1="( ( &W3 -> ( &W4 -> &W2 ) ) -> ( ( &W3 -> &W4 ) -> ( &W3 -> &W2 ) ) )", 
+            ~expr2="( &W1                       -> ( ( ph  -> ps  ) -> ( ph  -> ch  ) ) )", 
+            ~expected = [ 
+                ("&W3", "ph"),
+                ("&W4", "ps"),
+                ("&W2", "ch"),
+                ("&W1", "( ph -> ( ps -> ch ) )"),
+            ] 
+        )
+
+        testUnifSubs( 
+            ~expr1="|- ( ( &W3 -> ( &W4 -> &W2 ) ) -> ( ( &W3 -> &W4 ) -> ( &W3 -> &W2 ) ) )", 
+            ~expr2="|- ( &W1                       -> ( ( ph  -> ps  ) -> ( ph  -> ch  ) ) )", 
+            ~expected = [ 
+                ("&W3", "ph"),
+                ("&W4", "ps"),
+                ("&W2", "ch"),
+                ("&W1", "( ph -> ( ps -> ch ) )"),
+            ] 
+        )
+    })
+
+    it("autoMergeDuplicatedStatements", _ => {
+        setTestDataDir("autoMergeDuplicatedStatements")
+        let st = createEditorState(~mmFilePath=setMmPath, ~stopBefore="bj-0", ~debug, ~editorState="editor-initial-state", ())
+        let st = st->MM_wrk_editor.updateEditorStateWithPostupdateActions(st => {
+            {...st, settings:{...st.settings, autoMergeStmts:true}}
+        })
+        assertEditorState(st, "step1")
+
+        let st = st->applySubstitution(
+            ~replaceWhat="|- ( ( &W3 -> ( &W4 -> &W2 ) ) -> ( ( &W3 -> &W4 ) -> ( &W3 -> &W2 ) ) )", 
+            ~replaceWith="|- ( &W1 -> ( ( ph -> ps ) -> ( ph -> ch ) ) )",
+            ~useMatching=false,
+        )
+        assertEditorState(st, "step2")
+
+        let (st, d1) = st->duplicateStmt(st->getStmtId(~label="qed", ()))
+        assertEditorState(st, "step3")
+
+        let st = st->updateStmt(d1, ~content="|- ( ( ph -> ( ps -> ch ) ) -> ( ( ph -> ps ) -> ( ph -> ch ) ) ) +", ())
+        assertEditorState(st, "step4")
+
+        let st = st->updateStmt(d1, ~content="|- ( ( ph -> ( ps -> ch ) ) -> ( ( ph -> ps ) -> ( ph -> ch ) ) )", ())
+        assertEditorState(st, "step5")
+
+        let st = MM_wrk_editor.uncheckAllStmts(st)
+        let st = MM_wrk_editor.toggleStmtChecked(st,st->getStmtId(~label="syl.2", ()))
+        let (st, newId) = MM_wrk_editor.addNewStmt(st)
+        let st = st->MM_wrk_editor.setStmtCont( newId, "|- ( ps -> ch )"->MM_wrk_editor.strToCont(()) )
+        let st = MM_wrk_editor.uncheckAllStmts(st)
+        let st = st->MM_wrk_editor.updateEditorStateWithPostupdateActions(st => st)
+        assertEditorState(st, "step6")
+
+        let st = st->updateStmt(newId, ~content="|- ( ps -> ch ) +", ())
+        assertEditorState(st, "step7")
+
+        let st = st->updateStmt(newId, ~content="|- ( ps -> ch )", ())
+        assertEditorState(st, "step8")
+
+        let st = st->deleteStmts([newId])
+        let st = MM_wrk_editor.uncheckAllStmts(st)
+        let st = MM_wrk_editor.toggleStmtChecked(st,st->getStmtId(~label="qed", ()))
+        let (st, newId2) = MM_wrk_editor.addNewStmt(st)
+        let st = st->MM_wrk_editor.setStmtCont( 
+            newId2, 
+            "|- ( ( ph -> ( ps -> ch ) ) -> ( ( ph -> ps ) -> ( ph -> ch ) ) )"->MM_wrk_editor.strToCont(()) 
+        )
+        let st = MM_wrk_editor.uncheckAllStmts(st)
+        let st = st->MM_wrk_editor.updateEditorStateWithPostupdateActions(st => st)
+        assertEditorState(st, "step9")
+
+        let st = st->updateStmt(newId2, ~content="|- ( ( ph -> ( ps -> ch ) ) -> ( ( ph -> ps ) -> ( ph -> ch ) ) ) +", ())
+        assertEditorState(st, "step10")
+
+        let st = st->updateStmt(newId2, ~content="|- ( ( ph -> ( ps -> ch ) ) -> ( ( ph -> ps ) -> ( ph -> ch ) ) )", ())
+        assertEditorState(st, "step11")
     })
 
     // it("bottom-up prover should not find missing disjoints if allowNewDisjForExistingVars==false", _ => {

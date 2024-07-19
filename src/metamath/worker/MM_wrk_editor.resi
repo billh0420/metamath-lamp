@@ -6,6 +6,7 @@ open MM_wrk_settings
 open MM_parenCounter
 open MM_substitution
 open MM_statements_dto
+open MM_wrk_pre_ctx_data
 
 type mmFileSourceType = Local | Web
 
@@ -20,23 +21,24 @@ type mmFileSource =
     | Local({fileName:string})
     | Web(webSource)
 
-type mmCtxSrcDto = {
-    typ: string,
-    fileName: string,
-    url: string,
-    readInstr: string,
-    label: string,
-}
-
 type stmtSym = {
     sym: string,
     color: option<string>,
 }
 
-type stmtContTreeData = {exprTyp:string, root:syntaxTreeNode, clickedNodeId:option<int>, expLvl:int}
+type stmtContTreeData = {
+    text:string, 
+    exprTyp:string, 
+    root:syntaxTreeNode, 
+    clickedNodeId:option<(int,Js_date.t)>, 
+    expLvl:int
+}
+
 type stmtCont =
-    | Text(array<stmtSym>)
+    | Text({text:string, syms:array<stmtSym>})
     | Tree(stmtContTreeData)
+
+let defaultJstfForHyp:string
 
 let contIsEmpty: stmtCont => bool
 let contToArrStr: stmtCont => array<string>
@@ -62,6 +64,13 @@ type stmtId = string
 
 type proofStatus = Ready | Waiting | NoJstf | JstfIsIncorrect
 
+type stmtGenericError = {
+    code:int,
+    msg:string,
+}
+let someStmtErrCode:int
+let duplicatedStmtErrCode:int
+
 type userStmt = {
     id: stmtId,
 
@@ -69,13 +78,15 @@ type userStmt = {
     labelEditMode: bool,
     typ: userStmtType,
     typEditMode: bool,
+    isGoal: bool,
     cont: stmtCont,
     contEditMode: bool,
+    isDuplicated: bool,
     
     jstfText: string,
     jstfEditMode: bool,
 
-    stmtErr: option<string>,
+    stmtErr: option<stmtGenericError>,
 
     expr: option<expr>,
     jstf: option<jstf>,
@@ -95,9 +106,10 @@ type editorState = {
     srcs: array<mmCtxSrcDto>,
     preCtxV: int,
     preCtx: mmContext,
-    frms: Belt_MapString.t<frmSubsData>,
+    frms: frms,
     parenCnt: parenCnt,
     preCtxColors: Belt_HashMapString.t<string>,
+    allTypes: array<int>,
     syntaxTypes: array<int>,
     parensMap: Belt_HashMapString.t<string>,
 
@@ -112,15 +124,15 @@ type editorState = {
     disjText: string,
     disjEditMode: bool,
     disjErr: option<string>,
-    disj: Belt_MapInt.t<Belt_SetInt.t>,
 
     wrkCtx: option<mmContext>,
 
     nextStmtId: int,
     stmts: array<userStmt>,
-    checkedStmtIds: array<stmtId>,
+    checkedStmtIds: array<(stmtId,Js_date.t)>,
 
     unifyAllIsRequiredCnt: int,
+    continueMergingStmts: int,
 }
 
 type wrkSubsErr = 
@@ -133,22 +145,22 @@ type wrkSubs = {
     mutable err: option<wrkSubsErr>,
 }
 
-let createEmptyUserStmt: (string, userStmtType, string) => userStmt
+let createEmptyUserStmt: (string, userStmtType, string, bool) => userStmt
 let userStmtToRootStmt: userStmt => rootStmt
 
-let updateStmt: (editorState, string, userStmt => userStmt) => editorState
-let isStmtChecked: (editorState, string) => bool
-let toggleStmtChecked: (editorState, string) => editorState
+let updateStmt: (editorState, stmtId, userStmt => userStmt) => editorState
+let isStmtChecked: (editorState, stmtId) => bool
+let toggleStmtChecked: (editorState, stmtId) => editorState
 let checkAllStmts: editorState => editorState
 let uncheckAllStmts: editorState => editorState
 let deleteCheckedStmts: editorState => editorState
-let deleteStmt: (editorState, string) => editorState
+let deleteStmt: (editorState, stmtId) => editorState
 let canMoveCheckedStmts: (editorState, bool) => bool
 let moveCheckedStmts: (editorState, bool) => editorState
 let getRootStmtsForUnification: editorState => array<userStmt>
-let addNewStmt: editorState => (editorState,string)
+let addNewStmt: editorState => (editorState,stmtId)
 let isSingleStmtChecked: editorState => bool
-let duplicateCheckedStmt: editorState => editorState
+let duplicateCheckedStmt: (editorState,bool) => editorState
 let canGoEditModeForStmt: (editorState, string) => bool
 let setDescrEditMode: editorState => editorState
 let completeDescrEditMode: (editorState, string) => editorState
@@ -159,50 +171,85 @@ let completeDisjEditMode: (editorState, string) => editorState
 let setLabelEditMode: (editorState, string) => editorState
 let completeLabelEditMode: (editorState, string, Js_string2.t) => editorState
 let setContEditMode: (editorState, string) => editorState
-let completeContEditMode: (editorState, string, string) => editorState
+let completeContEditMode: (editorState, stmtId, string) => editorState
 let setStmtCont: (editorState, stmtId, stmtCont) => editorState
-let setTypEditMode: (editorState, string) => editorState
-let completeTypEditMode: (editorState, string, userStmtType) => editorState
+let setTypEditMode: (editorState, stmtId) => editorState
+let completeTypEditMode: (editorState, stmtId, userStmtType, bool) => editorState
 let setJstfEditMode: (editorState, string) => editorState
-let completeJstfEditMode: (editorState, string, string) => editorState
+let completeJstfEditMode: (editorState, stmtId, string) => editorState
 let incUnifyAllIsRequiredCnt: editorState => editorState
-let setSettings: (editorState, int, settings) => editorState
-let setPreCtx: (editorState, array<mmCtxSrcDto>, int, mmContext) => editorState
+let incContinueMergingStmts: editorState => editorState
+let setPreCtxData: (editorState, preCtxData) => editorState
 let editorStateHasErrors: editorState => bool
-let prepareEditorForUnification: editorState => editorState
+let editorStateHasDuplicatedStmts: editorState => bool
+let createNewDisj: (editorState, disjMutable) => editorState
 let addNewStatements: (editorState, stmtsDto) => editorState
-let findPossibleSubs: (editorState, expr, expr) => array<wrkSubs>
-let applySubstitutionForEditor: (editorState, wrkSubs) => editorState
 let removeUnusedVars: editorState => editorState
 let applyUnifyAllResults: (editorState,proofTreeDto) => editorState
 let updateEditorStateWithPostupdateActions: (editorState, editorState => editorState) => editorState
 let generateCompressedProof: (editorState, string) => option<(string,string,string)>
 let updateColorsInAllStmts: editorState => editorState
 let getTheOnlyCheckedStmt: editorState => option<userStmt>
-let editorGetStmtById: (editorState, string) => option<userStmt>
+let editorGetStmtById: (editorState, stmtId) => option<userStmt>
+let editorGetStmtByIdExn: (editorState, stmtId) => userStmt
 let getAllExprsToSyntaxCheck: (editorState, array<rootStmt>) => array<expr>
-let mergeStmts: (editorState, string, string) => result<editorState, string>
-let renameStmt: (editorState, string, string) => result<editorState, string>
+let mergeStmts: (editorState, stmtId, stmtId) => result<editorState, string>
+let renameStmt: (editorState, stmtId, string) => result<editorState, string>
 let findStmtsToMerge: editorState => result<(userStmt,userStmt), string>
 let parseJstf: string => result<option<jstf>,string>
+let removeAllTempData: editorState => editorState
+let isEditMode: editorState => bool
+let resetEditorContent: editorState => editorState
 
+let getSelectedSubtree: stmtContTreeData => option<childNode>
+let getSelectedSubtreeFromStmtCont: stmtCont => option<childNode>
 let getIdsOfSelectedNodes: stmtCont => (int,Belt_SetInt.t)
 let hasSelectedText: stmtCont => bool
 let getSelectedText: stmtCont => option<string>
 let getNodeIdBySymIdx: ( ~symIdx:int, ~tree:syntaxTreeNode) => option<int>
 let incExpLvl: stmtContTreeData => stmtContTreeData
 let decExpLvl: stmtContTreeData => stmtContTreeData
+let incExpLvlIfConstClicked: stmtContTreeData => stmtContTreeData
 let getNumberOfSelectedSymbols: stmtContTreeData => int
-let getSelectedSymbols: stmtCont => option<array<string>>
+let updateExpLevel: (stmtContTreeData, bool) => stmtContTreeData
 
 let addColorsToSyntaxTree: (
     ~tree:syntaxTreeNode,
-    ~preCtxColors:Belt_HashMapString.t<string>,
-    ~wrkCtxColors:Belt_HashMapString.t<string>,
+    ~preCtxColors:Belt_HashMapString.t<string>=?,
+    ~wrkCtxColors:Belt_HashMapString.t<string>=?,
+    ()
 ) => syntaxTreeNode
 
 let getColorForSymbol: (
     ~sym:string,
-    ~preCtxColors:Belt_HashMapString.t<string>,
-    ~wrkCtxColors:Belt_HashMapString.t<string>,
+    ~preCtxColors:option<Belt_HashMapString.t<string>>,
+    ~wrkCtxColors:option<Belt_HashMapString.t<string>>,
 ) => option<string>
+
+let createSymbolColors: (~ctx:mmContext, ~typeColors: Belt_HashMapString.t<string>) => Belt_HashMapString.t<string>
+
+let renumberSteps: editorState => result<editorState, string>
+
+let textToSyntaxProofTable: (
+    ~wrkCtx:mmContext,
+    ~syms:array<array<string>>,
+    ~syntaxTypes:array<int>,
+    ~frms: frms,
+    ~frameRestrict:frameRestrict,
+    ~parenCnt: parenCnt,
+    ~lastSyntaxType:option<string>,
+    ~onLastSyntaxTypeChange:string => unit,
+) => result<array<result<MM_proof_table.proofTable,string>>,string>
+
+let textToSyntaxTree: (
+    ~wrkCtx:mmContext,
+    ~syms:array<array<string>>,
+    ~syntaxTypes:array<int>,
+    ~frms: frms,
+    ~frameRestrict:frameRestrict,
+    ~parenCnt: parenCnt,
+    ~lastSyntaxType:option<string>,
+    ~onLastSyntaxTypeChange:string => unit,
+) => result<array<result<syntaxTreeNode,string>>,string>
+
+let recalcWrkColors: editorState => editorState

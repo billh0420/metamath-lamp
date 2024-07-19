@@ -5,7 +5,6 @@ open MM_proof_table
 open MM_proof_verifier
 open MM_proof_tree_dto
 open MM_provers
-open MM_parenCounter
 open MM_substitution
 
 let testCreateProof = (~mmFile, ~exprStr, ~expectedProofStr) => {
@@ -14,7 +13,7 @@ let testCreateProof = (~mmFile, ~exprStr, ~expectedProofStr) => {
     let (ast, _) = parseMmFile(~mmFileContent=mmFileText, ())
     let ctx = loadContext(ast, ())
     let parens = "( ) { } [ ]"
-    ctx->moveConstsToBegin(parens)
+    let ctx = ctx->ctxOptimizeForProver(~parens, ())
     let expr = ctx->ctxStrToIntsExn(exprStr)
     let frms = prepareFrmSubsData(~ctx, ())
 
@@ -22,8 +21,9 @@ let testCreateProof = (~mmFile, ~exprStr, ~expectedProofStr) => {
     let proofTree = proveFloatings(
         ~wrkCtx=ctx,
         ~frms,
+        ~frameRestrict = { useDisc:true, useDepr:true, useTranDepr:true },
         ~floatingsToProve = [expr],
-        ~parenCnt=parenCntMake(ctx->ctxStrToIntsExn(parens), ()),
+        ~parenCnt=MM_provers.makeParenCnt(~ctx, ~parens),
     )
 
     //then

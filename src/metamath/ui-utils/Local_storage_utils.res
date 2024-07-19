@@ -57,7 +57,7 @@ let useStateFromLocalStorage = (
     ( value, setValue )
 }
 
-let useStateFromLocalStorageBool = (key:string,default:bool):(bool, (bool=>bool) => unit) => {
+let useStateFromLocalStorageBool = (~key:string,~default:bool):(bool, (bool=>bool) => unit) => {
     useStateFromLocalStorage(
         ~key,
         ~fromString = boolStrOpt => {
@@ -69,5 +69,31 @@ let useStateFromLocalStorageBool = (key:string,default:bool):(bool, (bool=>bool)
             }
         },
         ~toString = Expln_utils_common.stringify,
+    )
+}
+
+let useStateFromLocalStorageStr = (~key:string,~default:string):(string, (string=>string) => unit) => {
+    useStateFromLocalStorage(
+        ~key,
+        ~fromString = strOpt => {
+            switch strOpt {
+                | None => default
+                | Some(str) => str
+            }
+        },
+        ~toString = str => str,
+    )
+}
+
+let useStateFromLocalStorageInt = (~key:string,~default:int):(int, (int=>int) => unit) => {
+    useStateFromLocalStorage(
+        ~key,
+        ~fromString = strOpt => {
+            switch strOpt {
+                | None => default
+                | Some(str) => str->Belt_Int.fromString->Belt.Option.getWithDefault(default)
+            }
+        },
+        ~toString = Belt_Int.toString,
     )
 }

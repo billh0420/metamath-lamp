@@ -12,11 +12,10 @@
 
   "jsx": { "version": 4, "mode": "classic" },
   "bs-dependencies": [
-    "@rescript/react",
-    "@expln/utils"
+    "@rescript/react"
   ],
   "warnings": {
-    "number": "-45-23",
+    "number": "-45",
     "error": "+8"
   }
 }

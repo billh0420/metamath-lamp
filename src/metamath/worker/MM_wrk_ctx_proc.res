@@ -43,7 +43,7 @@ let respToStr = resp => {
 }
 
 type wrkPrecalcData = {
-    wrkFrms: Belt_MapString.t<frmSubsData>,
+    wrkFrms: frms,
     wrkParenCnt: parenCnt,
     wrkCtx: mmContext,
 }
@@ -82,14 +82,14 @@ let preCtxCache = cacheMake(
 )
 
 let frmsCache = cacheMake(
-    ~recalc = ((settings,ctx)) => {
-        prepareFrmSubsData(~ctx, ~asrtsToSkip=Belt_HashSetString.fromArray(settings.asrtsToSkip), ())
+    ~recalc = ((_,ctx)) => {
+        prepareFrmSubsData(~ctx, ())
     },
     ~depVerEq = ((sv1,cv1),(sv2,cv2)) => sv1 == sv2 && cv1 == cv2
 )
 
 let parenCntCache = cacheMake(
-    ~recalc = ((settings,ctx)) => parenCntMake(prepareParenInts(ctx, settings.parens), ()),
+    ~recalc = ((settings,ctx)) => MM_provers.makeParenCnt(~ctx, ~parens=settings.parens),
     ~depVerEq = ((sv1,cv1),(sv2,cv2)) => sv1 == sv2 && cv1 == cv2
 )
 

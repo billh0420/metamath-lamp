@@ -1,4 +1,5 @@
 open MM_parser
+open MM_wrk_settings
 
 type expr = array<int>
 
@@ -23,8 +24,9 @@ type frameDbg = {
 }
 
 type frame = {
+    ord:int,
     isAxiom:bool,
-    disj: Belt.Map.Int.t<Belt_SetInt.t>,
+    disj: Belt_MapInt.t<Belt_SetInt.t>,
     hyps: array<hypothesis>,
     asrt: expr,
     label: string,
@@ -34,11 +36,31 @@ type frame = {
     numOfArgs: int,
     descr:option<string>,
     proof:option<proof>,
+    isDisc:bool, /* is discouraged */
+    isDepr:bool, /* is deprecated */
+    isTranDepr:bool, /* is transitively deprecated (depends on an isDepr frame or another isTranDepr frame) */
     dbg: option<frameDbg>,
 }
 
+type optimizedConstsOrder = {
+    allConsts:array<string>,
+    parenMin:int,
+    canBeFirstMin:int,
+    canBeFirstMax:int,
+    canBeLastMin:int,
+    canBeLastMax:int,
+}
+
 let createContext: (~parent:mmContext=?, ~debug:bool=?, ()) => mmContext
-let applySingleStmt: (mmContext, stmt) => unit
+let applySingleStmt: (
+    mmContext, 
+    stmt,
+    ~descrRegexToDisc:Js_re.t=?,
+    ~labelRegexToDisc:Js_re.t=?,
+    ~descrRegexToDepr:Js_re.t=?,
+    ~labelRegexToDepr:Js_re.t=?,
+    ()
+) => unit
 let openChildContext: mmContext => unit
 let closeChildContext: mmContext => unit
 let resetToParentContext: mmContext => unit
@@ -49,11 +71,24 @@ let loadContext: (
     ~stopAfter:string=?, 
     ~onPreProcess: (mmContext,MM_parser.stmt)=>unit =?,
     ~expectedNumOfAssertions:int=?, 
+    ~descrRegexToDisc:Js_re.t=?,
+    ~labelRegexToDisc:Js_re.t=?,
+    ~descrRegexToDepr:Js_re.t=?,
+    ~labelRegexToDepr:Js_re.t=?,
     ~onProgress:float=>unit=?, 
     ~debug:bool=?, 
     ()
 ) => mmContext
-let ctxOptimizeForProver: mmContext => mmContext
+
+let ctxOptimizeForProver: ( 
+    mmContext,
+    ~parens:string,
+    ~removeAsrtDescr:bool=?,
+    ~removeProofs:bool=?,
+    ()
+) => mmContext
+
+let ctxGetOptimizedConstsOrder: (mmContext, ~parens:string) => optimizedConstsOrder
 
 let isDebug: mmContext => bool
 let isConst: (mmContext,string) => bool
@@ -61,16 +96,18 @@ let isVar: (mmContext,string) => bool
 let isHyp: (mmContext,string) => bool
 let isAsrt: (mmContext,string) => bool
 let isDisj: (mmContext,int,int) => bool
+let getAllConsts: mmContext => array<string>
 let getHypothesis: (mmContext,string) => option<hypothesis>
 let getHypByExpr: (mmContext, expr) => option<hypothesis>
 let getMandHyps: (mmContext, expr) => array<hypothesis>
 let getAllHyps: mmContext => Belt_MapString.t<hypothesis>
 let getAllFrames: mmContext => Belt_MapString.t<frame>
-let getAllFrameLabels: mmContext => array<string>
+let getAllFramesArr: mmContext => array<frame>
 let getAllDisj: mmContext => disjMutable
 let getLocalDisj: mmContext => disjMutable
 let getFrame: (mmContext,string) => option<frame>
 let getFrameExn: (mmContext,string) => frame
+let frameIsAllowed: (frame, frameRestrict) => bool
 let getLocalVars: mmContext => array<string>
 let getLocalHyps: mmContext => array<hypothesis>
 let getNumOfVars: mmContext => int
@@ -96,6 +133,7 @@ let frmIntsToStrExn: (mmContext, frame, expr) => string
 let frmIntsToSymsExn: (mmContext, frame, expr) => array<string>
 let createFrame: (
     ~ctx:mmContext, 
+    ~ord:int,
     ~isAxiom:bool, 
     ~label:string, 
     ~exprStr:array<string>, 
@@ -103,15 +141,17 @@ let createFrame: (
     ~tokenType:string=?,
     ~skipEssentials:bool=?, 
     ~skipFirstSymCheck:bool=?, 
+    ~descrRegexToDisc:Js_re.t=?,
+    ~labelRegexToDisc:Js_re.t=?,
+    ~descrRegexToDepr:Js_re.t=?,
+    ~labelRegexToDepr:Js_re.t=?,
     ()
 ) => frame
-
-let moveConstsToBegin: (mmContext, string) => unit
 
 let generateNewVarNames: ( 
     ~ctx: mmContext, 
     ~types: array<int>, 
-    ~typeToPrefix: Belt_MapString.t<string>, 
+    ~typeToPrefix: Belt_MapString.t<string>=?, 
     ~reservedNames: Belt_HashSetString.t=?, 
     unit
 ) => array<string>
@@ -128,10 +168,12 @@ let generateNewLabels: (
 let disjMake: unit => disjMutable
 let disjAddPair: (disjMutable, int, int) => unit
 let disjContains: (disjMutable, int, int) => bool
+let disjImmContains: (Belt_MapInt.t<Belt_SetInt.t>, int, int) => bool
 let disjToArr: disjMutable => array<array<int>>
 let disjForEachArr: (disjMutable, array<int> => unit) => unit
 let disjForEach: (disjMutable, (int,int) => unit) => unit
 let disjIsEmpty: disjMutable => bool
+let disjMutToDisjImm: disjMutable => Belt_MapInt.t<Belt_SetInt.t>
 
 let exprEq: (expr,expr) => bool
 

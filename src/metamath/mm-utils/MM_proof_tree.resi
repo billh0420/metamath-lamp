@@ -17,7 +17,6 @@ type proofNodeDbg = {
 
 type proofTreeDbg = {
     newVars: array<string>,
-    disj: array<string>,
     exprToStr: expr=>string,
 }
 
@@ -32,26 +31,25 @@ type exprSrc =
 type proofTree
 
 let ptMake: (
-    ~frms: Belt_MapString.t<frmSubsData>,
+    ~frms: frms,
     ~hyps: Belt_MapString.t<hypothesis>,
     ~ctxMaxVar: int,
-    ~disj: disjMutable,
+    ~ctxDisj: disjMutable,
     ~parenCnt: parenCnt,
     ~exprToStr: option<expr=>string>,
 ) => proofTree
 
-let ptGetFrms: proofTree => Belt_MapString.t<frmSubsData>
+let ptGetFrms: (proofTree,int) => array<frmSubsData>
 let ptGetHypByExpr: (proofTree, expr) => option<hypothesis>
 let ptGetHypByLabel: (proofTree, string) => option<hypothesis>
 let ptGetMaxVar: proofTree => int
 let ptGetCtxMaxVar: proofTree => int
 let ptGetParenCnt: proofTree => parenCnt
-let ptIsDisj: (proofTree, int, int) => bool
+let ptIsDisjInCtx: (proofTree, int, int) => bool
 let ptIsNewVarDef: (proofTree, expr) => bool
 let ptGetRootStmts: proofTree => array<rootStmt>
 let ptGetNode: (proofTree, expr) => proofNode
 let ptAddNewVar: (proofTree, int) => int
-let ptAddDisjPair: (proofTree, int, int) => unit
 let ptAddRootStmt: (proofTree, rootStmt) => unit
 let ptAddSyntaxProof: (proofTree, expr, proofNode) => unit
 let ptGetSyntaxProof: (proofTree, expr) => option<proofNode>
@@ -60,15 +58,20 @@ let ptClearDists: proofTree => unit
 let ptGetDbg: proofTree => option<proofTreeDbg>
 
 let ptGetCopyOfNewVars: proofTree => array<expr>
-let ptGetDisj: proofTree => disjMutable
+let ptGetCtxDisj: proofTree => disjMutable
 
+let pnGetId: proofNode => int
 let pnGetExpr: proofNode => expr
 let pnGetProof: proofNode => option<exprSrc>
 let pnGetFParents: proofNode => option<array<exprSrc>>
 let pnGetEParents: proofNode => array<exprSrc>
-let pnAddParent: (proofNode, exprSrc, bool) => unit
+let pnAddParent: (proofNode, exprSrc, bool, bool) => unit
 let pnIsInvalidFloating: proofNode => bool
 let pnSetInvalidFloating: proofNode => unit
 let pnGetDist: proofNode => option<int>
 let pnSetDist: (proofNode,int) => unit
 let pnGetDbg: proofNode => option<proofNodeDbg>
+
+let jstfEqSrc: (array<expr>, string, exprSrc) => bool
+
+let ptPrintStats: ( proofTree ) => string

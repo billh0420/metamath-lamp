@@ -1,17 +1,19 @@
 open Expln_React_common
 open Expln_React_Mui
 open MM_wrk_editor
+open MM_wrk_editor_substitution
 open MM_context
 open Expln_utils_promise
 open Expln_React_Modal
 open Common
+open MM_react_common
 
 type state = {
     expr1Str: string,
     expr1Err: option<string>,
     expr2Str: string,
     expr2Err: option<string>,
-    results: option<array<wrkSubs>>,
+    results: option<result<array<wrkSubs>,string>>,
     checkedResultIdx: option<int>,
     invalidResults: option<array<wrkSubs>>,
 }
@@ -31,12 +33,33 @@ let makeInitialState = (
     }
 }
 
-let setResults = (st,results):state => {
+let setResults = (st:state,results:result<array<wrkSubs>,string>):state => {
+    let validResults = switch results {
+        | Error(msg) => Error(msg)
+        | Ok(results) => Ok(results->Js_array2.filter(res => res.err->Belt_Option.isNone))
+    }
+    let invalidResults = switch results {
+        | Error(_) => []
+        | Ok(results) => results->Js_array2.filter(res => res.err->Belt_Option.isSome)
+    }
+    let checkedResultIdx = switch validResults {
+        | Error(_) => None
+        | Ok(validResults) => if (validResults->Js_array2.length == 1) {Some(0)} else {None}
+    }
     {
         ...st,
-        results:Some(results->Js_array2.filter(res => res.err->Belt_Option.isNone)),
-        checkedResultIdx: if (results->Js_array2.length == 1) {Some(0)} else {None},
-        invalidResults:Some(results->Js_array2.filter(res => res.err->Belt_Option.isSome)),
+        results:Some(validResults),
+        checkedResultIdx,
+        invalidResults:Some(invalidResults),
+    }
+}
+
+let clearResults = (st):state => {
+    {
+        ...st,
+        results: None,
+        checkedResultIdx: None,
+        invalidResults: None,
     }
 }
 
@@ -64,6 +87,24 @@ let swapExprs = (st):state => {
     }
 }
 
+let copyExpr1ToExpr2 = (st):state => {
+    {
+        ...st,
+        expr1Err:None,
+        expr2Err:None,
+        expr2Str: st.expr1Str,
+    }
+}
+
+let copyExpr2ToExpr1 = (st):state => {
+    {
+        ...st,
+        expr1Err:None,
+        expr2Err:None,
+        expr1Str: st.expr2Str,
+    }
+}
+
 let toggleResultChecked = (st,idx) => {
     if (st.checkedResultIdx == Some(idx)) {
         {
@@ -84,6 +125,9 @@ let rndIconButton = (~icon:reElem, ~onClick:unit=>unit, ~active:bool, ~title:opt
     </span>
 }
 
+let findSubsByMatch = "match"
+let findSubsByUnif = "unif"
+
 @react.component
 let make = (
     ~modalRef:modalRef,
@@ -95,9 +139,20 @@ let make = (
     ~onSubstitutionSelected:wrkSubs=>unit
 ) => {
     let (state, setState) = React.useState(() => makeInitialState(~expr1Init, ~expr2Init))
+    let (findSubsBy, setFindSubsBy) = Local_storage_utils.useStateFromLocalStorageStr(
+        ~key="find-substitution-by", ~default=findSubsByMatch
+    )
+    let expr1TextFieldRef = React.useRef(Js.Nullable.null)
+    let expr2TextFieldRef = React.useRef(Js.Nullable.null)
 
-    let actSaveResults = results => {
+    let methodName = if (findSubsBy == findSubsByMatch) {"Match"} else {"Unify"}
+
+    let actSaveResults = (results:result<array<wrkSubs>,string>) => {
         setState(setResults(_, results))
+    }
+
+    let actClearResults = () => {
+        setState(clearResults)
     }
 
     let actDetermineSubs = () => {
@@ -117,14 +172,20 @@ let make = (
             }
             st
         })
-        if (incorrectSymbol1->Belt.Option.isNone && incorrectSymbol2->Belt.Option.isNone) {
+        if (
+            incorrectSymbol1->Belt.Option.isNone && incorrectSymbol2->Belt.Option.isNone
+            && syms1->Js.Array2.length > 0 && syms2->Js.Array2.length > 0
+        ) {
             actSaveResults(
                 findPossibleSubs(
                     editorState, 
                     wrkCtx->ctxSymsToIntsExn(syms1),
                     wrkCtx->ctxSymsToIntsExn(syms2),
+                    findSubsBy == findSubsByMatch,
                 )
             )
+        } else {
+            actClearResults()
         }
     }
 
@@ -136,28 +197,80 @@ let make = (
         switch state.results {
             | None => ()
             | Some(results) => {
-                switch state.checkedResultIdx {
-                    | Some(idx) => {
-                        if (0 <= idx && idx < results->Js.Array2.length) {
-                            onSubstitutionSelected(results[idx])
-                        }
+                switch results {
+                    | Error(_) => ()
+                    | Ok(results) => {
+                        switch state.checkedResultIdx {
+                            | Some(idx) => {
+                                if (0 <= idx && idx < results->Js.Array2.length) {
+                                    onSubstitutionSelected(results[idx])
+                                }
+                            }
+                            | None => ()
+                        } 
                     }
-                    | None => ()
-                } 
+                }
             }
         }
     }
 
+    let actFocus = (ref:React.ref<Js.Nullable.t<Dom.element>>) => {
+        switch ref.current->Js.Nullable.toOption {
+            | None => ()
+            | Some(domElem) => {
+                let input = ReactDOM.domElementToObj(domElem)
+                switch input["focus"] {
+                    | None => ()
+                    | Some(_) => input["focus"](.)
+                }
+            }
+        }
+    }
+
+    let actExpr1OnEnter = () => {
+        if (state.expr2Str->Js_string2.trim == "") {
+            actFocus(expr2TextFieldRef)
+        } else {
+            actDetermineSubs()
+        }
+    }
+
+    let actExpr2OnEnter = () => {
+        if (state.expr1Str->Js_string2.trim == "") {
+            actFocus(expr1TextFieldRef)
+        } else {
+            actDetermineSubs()
+        }
+    }
+
     let actExpr1Change = str => {
+        actClearResults()
         setState(setExpr1Str(_,str))
     }
 
     let actExpr2Change = str => {
+        actClearResults()
         setState(setExpr2Str(_,str))
     }
 
     let actSwapExprs = () => {
+        actClearResults()
         setState(swapExprs)
+    }
+
+    let actCopyExpr1ToExpr2 = () => {
+        actClearResults()
+        setState(copyExpr1ToExpr2)
+    }
+
+    let actCopyExpr2ToExpr1 = () => {
+        actClearResults()
+        setState(copyExpr2ToExpr1)
+    }
+
+    let actFindSubsByChange = newValue => {
+        actClearResults()
+        setFindSubsBy(_ => if (newValue == findSubsByMatch) {findSubsByMatch} else {findSubsByUnif})
     }
 
     let rndError = msgOpt => {
@@ -167,8 +280,10 @@ let make = (
         }
     }
     
-    let rndExpr = (~label, ~value, ~autoFocus, ~onChange, ~tabIndex:int) => {
+    let rndExpr = (~label, ~value, ~autoFocus, ~onChange, ~tabIndex:int, 
+        ~onEnter:unit=>unit, ~ref:React.ref<Js.Nullable.t<Dom.element>>) => {
         <TextField 
+            inputRef=ReactDOM.Ref.domRef(ref)
             label
             size=#small
             style=ReactDOM.Style.make(~width="700px", ())
@@ -176,28 +291,68 @@ let make = (
             value
             onChange=evt2str(onChange)
             inputProps={"tabIndex":tabIndex}
+            onKeyDown=kbrdHnd2(
+                kbrdClbkMake(~key=keyEnter, ~act=onEnter, ()),
+                kbrdClbkMake(~key=keyEsc, ~act=onCanceled, ()),
+            )
         />
     }
+
+    let expr1Label = `${methodName} what`
+    let expr2Label = `${methodName} with`
     
     let rndInput = () => {
         <Col>
+            <Row alignItems=#center>
+                {React.string("Find substitution by:")}
+                <RadioGroup
+                    row=true
+                    value=findSubsBy
+                    onChange=evt2str(actFindSubsByChange)
+                >
+                    <FormControlLabel value=findSubsByMatch control={ <Radio/> } label="Matching" />
+                    <FormControlLabel value=findSubsByUnif control={ <Radio/> } label="Unification" />
+                </RadioGroup>
+            </Row>
             <table>
                 <tbody>
                     <tr>
                         <td>
-                            {rndExpr(~label="Replace what", ~value=state.expr1Str, ~autoFocus=true, 
-                                ~onChange=actExpr1Change, ~tabIndex=1)}
+                            {rndExpr(~label=expr1Label, ~value=state.expr1Str, ~autoFocus=true, 
+                                ~onChange=actExpr1Change, ~tabIndex=1, ~onEnter=actExpr1OnEnter, 
+                                ~ref=expr1TextFieldRef)}
+                        </td>
+                        <td>
+                            {rndIconButton(
+                                ~icon=<MM_Icons.Logout style=ReactDOM.Style.make(~transform="rotate(90deg)", ()) />, 
+                                ~onClick={_=>actCopyExpr1ToExpr2()}, ~active=true, 
+                                ~title=`Copy this statement to the below text field`, ())}
                         </td>
                         <td>
                             {rndIconButton(~icon=<MM_Icons.SwapVert />, ~onClick={_=>actSwapExprs()}, ~active=true, 
-                                ~title="Swap \"Replace what\" and \"Replace with\"", ())}
+                                ~title=`Swap "${expr1Label}" and "${expr2Label}"`, ())}
                         </td>
                     </tr>
                 </tbody>
             </table>
             {rndError(state.expr1Err)}
-            {rndExpr(~label="Replace with", ~value=state.expr2Str, ~autoFocus=false,
-                ~onChange=actExpr2Change, ~tabIndex=2)}
+            <table>
+                <tbody>
+                    <tr>
+                        <td>
+                            {rndExpr(~label=expr2Label, ~value=state.expr2Str, ~autoFocus=false,
+                                    ~onChange=actExpr2Change, ~tabIndex=2, ~onEnter=actExpr2OnEnter,
+                                    ~ref=expr2TextFieldRef )}
+                        </td>
+                        <td>
+                            {rndIconButton(
+                                ~icon=<MM_Icons.Logout style=ReactDOM.Style.make(~transform="rotate(-90deg)", ()) />, 
+                                ~onClick={_=>actCopyExpr2ToExpr1()}, ~active=true, 
+                                ~title=`Copy this statement to the above text field`, ())}
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
             {rndError(state.expr2Err)}
             <Row>
                 <Button onClick={_=>actDetermineSubs()} variant=#contained color="grey" >
@@ -212,17 +367,22 @@ let make = (
         switch state.results {
             | None => React.null
             | Some(results) => {
-                let numOfResults = results->Js_array2.length
-                if (numOfResults > 0) {
-                    <Row>
-                        <Button onClick={_=>actChooseSelected()} variant=#contained
-                                disabled={state.checkedResultIdx->Belt.Option.isNone}>
-                            {React.string(if numOfResults == 1 {"Apply"} else {"Apply selected"})}
-                        </Button>
-                        <Button onClick={_=>onCanceled()}> {React.string("Cancel")} </Button>
-                    </Row>
-                } else {
-                    React.null
+                switch results {
+                    | Error(_) => React.null
+                    | Ok(results) => {
+                        let numOfResults = results->Js_array2.length
+                        if (numOfResults > 0) {
+                            <Row>
+                                <Button onClick={_=>actChooseSelected()} variant=#contained
+                                        disabled={state.checkedResultIdx->Belt.Option.isNone}>
+                                    {React.string(if numOfResults == 1 {"Apply"} else {"Apply selected"})}
+                                </Button>
+                                <Button onClick={_=>onCanceled()}> {React.string("Cancel")} </Button>
+                            </Row>
+                        } else {
+                            React.null
+                        }
+                    }
                 }
             }
         }
@@ -353,60 +513,65 @@ let make = (
         switch state.results {
             | None => React.null
             | Some(results) => {
-                let numOfInvalidResults = getNumberOfResults(state.invalidResults)
-                let summary = 
-                    <>
-                        {
-                            React.string(
-                                `Found substitutions: `
-                                    ++ `${getNumberOfResults(state.results)->Belt_Int.toString} valid, `
-                            )
-                        }
-                        {
-                            if (numOfInvalidResults == 0) {
-                                React.string( `0 invalid.` )
-                            } else {
-                                <span
-                                    onClick={_=> actShowInvalidSubs() }
-                                    style=ReactDOM.Style.make(~cursor="pointer", ~color="blue", ())
-                                >
-                                    {React.string( numOfInvalidResults->Belt_Int.toString ++ ` invalid.` )}
-                                </span>
-                            }
-                        }
-                    </>
-                let numOfResults = results->Js.Array2.length
-                <Col>
-                    summary
-                    {
-                        results->Js_array2.mapi((res,i) => {
-                            <Paper key={i->Belt_Int.toString}>
-                                <table>
-                                    <tbody>
-                                        <tr>
-                                            {
-                                                if (numOfResults > 1) {
+                switch results {
+                    | Error(msg) => React.string(`Error: ${msg}`)
+                    | Ok(results) => {
+                        let numOfInvalidResults = getNumberOfResults(state.invalidResults)
+                        let summary = 
+                            <>
+                                {
+                                    React.string(
+                                        `Found substitutions: `
+                                            ++ `${results->Js.Array2.length->Belt_Int.toString} valid, `
+                                    )
+                                }
+                                {
+                                    if (numOfInvalidResults == 0) {
+                                        React.string( `0 invalid.` )
+                                    } else {
+                                        <span
+                                            onClick={_=> actShowInvalidSubs() }
+                                            style=ReactDOM.Style.make(~cursor="pointer", ~color="blue", ())
+                                        >
+                                            {React.string( numOfInvalidResults->Belt_Int.toString ++ ` invalid.` )}
+                                        </span>
+                                    }
+                                }
+                            </>
+                        let numOfResults = results->Js.Array2.length
+                        <Col>
+                            summary
+                            {
+                                results->Js_array2.mapi((res,i) => {
+                                    <Paper key={i->Belt_Int.toString}>
+                                        <table>
+                                            <tbody>
+                                                <tr>
+                                                    {
+                                                        if (numOfResults > 1) {
+                                                            <td>
+                                                                <Checkbox
+                                                                    checked={state.checkedResultIdx == Some(i)}
+                                                                    onChange={_ => actToggleResultChecked(i)}
+                                                                />
+                                                            </td>
+                                                        } else {
+                                                            React.null
+                                                        }
+                                                    }
                                                     <td>
-                                                        <Checkbox
-                                                            checked={state.checkedResultIdx == Some(i)}
-                                                            onChange={_ => actToggleResultChecked(i)}
-                                                        />
+                                                        {rndWrkSubs(res)}
                                                     </td>
-                                                } else {
-                                                    React.null
-                                                }
-                                            }
-                                            <td>
-                                                {rndWrkSubs(res)}
-                                            </td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </Paper>
-                        })->React.array
+                                                </tr>
+                                            </tbody>
+                                        </table>
+                                    </Paper>
+                                })->React.array
+                            }
+                            {rndResultButtons()}
+                        </Col>
                     }
-                    {rndResultButtons()}
-                </Col>
+                }
             }
         }
     }

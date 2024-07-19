@@ -27,11 +27,13 @@ ready
 --- p -------------------------------------------------------------------------------
 stmt9-opabex2.11
  : elex
-|- ( A e. _V -> -> A e. _V )
+|- ( A e. _V -> psi A e. _V )
 jstfIsIncorrect
 Syntax error.
-Unif Error: Could not prove this floating statement:
-class _V ->
+Unif Error: Could not find a match for assertion:
+|- ( A e. B -> A e. _V )
+→
+|- ( A e. _V -> psi A e. _V )
 
 --- p -------------------------------------------------------------------------------
 stmt9-opabex2.31
@@ -50,9 +52,9 @@ stmt9
 stmt9-opabex2.11 stmt9-opabex2.11 stmt9-opabex2.31 stmt9-opabex2.41: opabex2
 |- ( A e. _V -> { <. u , v >. | ( ( u e. A /\ v e. A ) /\ ( F ` u ) = ( F ` v ) ) } e. _V )
 jstfIsIncorrect
-Unif Error: Could not unify essential hypothesis #3:
-1: |- ( A e. _V -> -> A e. _V )
-2: |- ( A e. _V -> -> A e. _V )
+Unif Error: Could not match essential hypothesis #3:
+1: |- ( A e. _V -> psi A e. _V )
+2: |- ( A e. _V -> psi A e. _V )
 3: |- ( ( A e. _V /\ ( ( u e. A /\ v e. A ) /\ ( F ` u ) = ( F ` v ) ) ) -> u e. A )
 4: |- ( ( A e. _V /\ ( ( u e. A /\ v e. A ) /\ ( F ` u ) = ( F ` v ) ) ) -> v e. A )
 
@@ -67,6 +69,15 @@ stmt6
  : fveq2
 |- ( u = x -> ( F ` u ) = ( F ` x ) )
 ready
+
+--- p -------------------------------------------------------------------------------
+stmt6.1
+ : fveq2
+|- ( u = x -> ( psi A ` u ) = ( psi A ` x ) )
+jstfIsIncorrect
+Syntax error.
+Unif Error: Could not prove this floating statement:
+class psi A
 
 --- p -------------------------------------------------------------------------------
 stmt7
@@ -86,7 +97,7 @@ stmt6 : adantr
 |- ( ( u = x / v = y ) -> ( F ` u ) = ( F ` x ) ) ]
 jstfIsIncorrect
 Syntax error - parentheses mismatch.
-Unif Error: Could not find a unification for assertion:
+Unif Error: Could not find a match for assertion:
 |- ( ( ph /\ ch ) -> ps )
 →
 |- ( ( u = x / v = y ) -> ( F ` u ) = ( F ` x ) ) ]
@@ -96,7 +107,7 @@ stmt3-brab2a.11
 stmt4 stmt5 : eqeq12d
 |- ( ( u = x /\ v = y ) -> ( ( F ` u ) = ( F ` v ) <-> ( F ` x ) = ( F ` y ) ) )
 jstfIsIncorrect
-Unif Error: Could not unify essential hypothesis #1
+Unif Error: Could not match essential hypothesis #1
 
 
 --- p -------------------------------------------------------------------------------

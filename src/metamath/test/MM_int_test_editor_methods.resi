@@ -11,7 +11,6 @@ let createEditorState: (
     ~stopBefore: string=?,
     ~stopAfter: string=?,
     ~editorState:string=?,
-    ~asrtsToSkipFilePath:string=?,
     ~debug: bool=?,
     unit,
 ) => editorState
@@ -20,7 +19,9 @@ let addStmt: (
     editorState,
     ~before:stmtId=?,
     ~typ: userStmtType=?,
+    ~isGoal:bool=?,
     ~label: string=?,
+    ~jstf:string=?, 
     ~stmt: string,
     unit,
 ) => (editorState, stmtId)
@@ -63,6 +64,7 @@ let applySubstitution: (
     editorState,
     ~replaceWhat: string,
     ~replaceWith: string,
+    ~useMatching:bool,
 ) => editorState
 
 let unifyAll: editorState => editorState
@@ -78,6 +80,9 @@ let unifyBottomUp: (
     ~allowNewDisjForExistingVars:bool=?,
     ~allowNewStmts:bool=?,
     ~allowNewVars: bool=?,
+    ~useDisc: bool=?,
+    ~useDepr: bool=?,
+    ~useTranDepr: bool=?,
     ~chooseLabel: string=?,
     ~chooseResult: stmtsDto=>bool =?,
     (),

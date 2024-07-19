@@ -1,11 +1,11 @@
-open MM_context
 open MM_wrk_editor
-open MM_wrk_settings
 open MM_parenCounter
+open MM_wrk_pre_ctx_data
 
 type userStmtLocStor = {
     label: string,
     typ: string,
+    isGoal: bool,
     cont: string,
     jstfText: string,
 }   
@@ -26,8 +26,10 @@ let userStmtLocStorToUserStmt = (userStmtLocStor:userStmtLocStor):userStmt => {
         labelEditMode: false,
         typ: userStmtTypeFromStr(userStmtLocStor.typ),
         typEditMode: false,
+        isGoal: userStmtLocStor.isGoal,
         cont: strToCont(userStmtLocStor.cont, ()),
         contEditMode: false,
+        isDuplicated: false,
 
         jstfText: userStmtLocStor.jstfText,
         jstfEditMode: false,
@@ -46,24 +48,21 @@ let userStmtLocStorToUserStmt = (userStmtLocStor:userStmtLocStor):userStmt => {
 }
 
 let createInitialEditorState = (
-    ~settingsV:int, 
-    ~settings:settings, 
-    ~srcs:array<mmCtxSrcDto>,
-    ~preCtxV:int, 
-    ~preCtx:mmContext, 
-    ~stateLocStor:option<editorStateLocStor>
+    ~preCtxData:preCtxData, 
+    ~stateLocStor:option<editorStateLocStor>,
 ) => {
     let st = {
-        settingsV,
-        settings,
+        settingsV:preCtxData.settingsV.ver,
+        settings:preCtxData.settingsV.val,
         typeColors: Belt_HashMapString.make(~hintSize=0),
 
-        srcs,
-        preCtxV,
-        preCtx,
-        frms: Belt_MapString.empty,
-        parenCnt: parenCntMake([], ()),
+        srcs:preCtxData.srcs,
+        preCtxV:preCtxData.ctxV.ver,
+        preCtx:preCtxData.ctxV.val,
+        frms: MM_substitution.frmsEmpty(),
+        parenCnt: parenCntMake(~parenMin=0, ~canBeFirstMin=0, ~canBeFirstMax=0, ~canBeLastMin=0, ~canBeLastMax=0),
         preCtxColors: Belt_HashMapString.make(~hintSize=0),
+        allTypes: [],
         syntaxTypes: [],
         parensMap:Belt_HashMapString.make(~hintSize=0),
 
@@ -78,7 +77,6 @@ let createInitialEditorState = (
         disjText: stateLocStor->Belt.Option.map(obj => obj.disjText)->Belt.Option.getWithDefault(""),
         disjEditMode: false,
         disjErr: None,
-        disj: Belt_MapInt.fromArray([]),
 
         wrkCtx: None,
 
@@ -97,15 +95,15 @@ let createInitialEditorState = (
         checkedStmtIds: [],
 
         unifyAllIsRequiredCnt: 0,
+        continueMergingStmts: 0,
     }
-    let st = st->setSettings(settingsV, settings)
-    let st = st->setPreCtx(st.srcs, preCtxV, preCtx)
+    let st = st->setPreCtxData(preCtxData)
     st
 }
 
 let editorStateToEditorStateLocStor = (state:editorState):editorStateLocStor => {
     {
-        srcs: state.srcs,
+        srcs: state.srcs->Js.Array2.map(src => {...src, ast:None, allLabels:[]}),
         descr:state.descr,
         varsText: state.varsText,
         disjText: state.disjText,
@@ -113,6 +111,7 @@ let editorStateToEditorStateLocStor = (state:editorState):editorStateLocStor => 
             {
                 label: stmt.label,
                 typ: (stmt.typ->userStmtTypeToStr),
+                isGoal: stmt.isGoal,
                 cont: contToStr(stmt.cont),
                 jstfText: stmt.jstfText,
             }
@@ -131,6 +130,9 @@ let readEditorStateFromJsonStr = (jsonStr:string):result<editorStateLocStor,stri
                     url: d->str("url", ()),
                     readInstr: d->str("readInstr", ()),
                     label: d->str("label", ()),
+                    resetNestingLevel: d->bool("resetNestingLevel", ~default=()=>true, ()),
+                    ast: None,
+                    allLabels: [],
                 }
             }, ()), ~default=()=>[], ()),
             descr: d->str("descr", ~default=()=>"", ()),
@@ -140,6 +142,7 @@ let readEditorStateFromJsonStr = (jsonStr:string):result<editorStateLocStor,stri
                 {
                     label: d->str("label", ()),
                     typ: d->str("typ", ()),
+                    isGoal: d->bool("isGoal", ~default=()=>false, ()),
                     cont: d->str("cont", ()),
                     jstfText: d->str("jstfText", ())
                 }

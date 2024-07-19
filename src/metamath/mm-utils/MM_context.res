@@ -1,5 +1,6 @@
 open MM_parser
 open MM_progress_tracker
+open MM_wrk_settings
 open Common
 
 type expr = array<int>
@@ -65,6 +66,7 @@ type frameDbg = {
 }
 
 type frame = {
+    ord:int,
     isAxiom:bool,
     disj: Belt_MapInt.t<Belt_SetInt.t>,
     hyps: array<hypothesis>,
@@ -76,6 +78,9 @@ type frame = {
     numOfArgs: int,
     descr:option<string>,
     proof:option<proof>,
+    isDisc:bool, /* is discouraged */
+    isDepr:bool, /* is deprecated */
+    isTranDepr:bool, /* is transitively deprecated (depends on an isDepr frame or another isTranDepr frame) */
     dbg: option<frameDbg>,
 }
 
@@ -95,11 +100,21 @@ type rec mmContextContents = {
     varTypes: Belt_HashMapInt.t<int>,
     mutable lastComment: option<string>,
     frames: Belt_HashMapString.t<frame>,
-    frameLabels:array<string>,
+    mutable totalNumOfFrames:int,
+    deprOrTranDeprFrms:Belt_HashSetString.t,
     debug:bool,
 }
 
 type mmContext = ref<mmContextContents>
+
+type optimizedConstsOrder = {
+    allConsts:array<string>,
+    parenMin:int,
+    canBeFirstMin:int,
+    canBeFirstMax:int,
+    canBeLastMin:int,
+    canBeLastMax:int,
+}
 
 let disjAddPair = (disjMap:disjMutable, n, m) => {
     if (n != m) {
@@ -111,6 +126,12 @@ let disjAddPair = (disjMap:disjMutable, n, m) => {
             | Some(set) => set->Belt_HashSetInt.add(max)
         }
     }
+}
+
+let disjMutToDisjImm = (disj:disjMutable):Belt_MapInt.t<Belt_SetInt.t> => {
+    disj->Belt_HashMapInt.toArray
+        ->Js.Array2.map(((n,ms)) => (n,ms->Belt_HashSetInt.toArray->Belt_SetInt.fromArray))
+        ->Belt_MapInt.fromArray
 }
 
 let rec forEachCtxInDeclarationOrder = (ctx:mmContextContents,consumer:mmContextContents=>option<'a>):option<'a> => {
@@ -193,6 +214,15 @@ let disjContains = (disj:disjMutable, n, m):bool => {
     switch disj->Belt_HashMapInt.get(min) {
         | None => false
         | Some(ms) => ms->Belt_HashSetInt.has(max)
+    }
+}
+
+let disjImmContains = (disj:Belt_MapInt.t<Belt_SetInt.t>, n, m):bool => {
+    let min = if (n <= m) {n} else {m}
+    let max = if (n <= m) {m} else {n}
+    switch disj->Belt_MapInt.get(min) {
+        | None => false
+        | Some(ms) => ms->Belt_SetInt.has(max)
     }
 }
 
@@ -358,6 +388,12 @@ let getFrameExn = (ctx:mmContext,label):frame => {
     }
 }
 
+let frameIsAllowed = (frame:frame, frameRestrict:frameRestrict):bool => {
+    (!frame.isDisc || frameRestrict.useDisc) 
+    && (!frame.isDepr || frameRestrict.useDepr) 
+    && (!frame.isTranDepr || frameRestrict.useTranDepr)
+}
+
 let getLocalVars: mmContext => array<string> = ctx => {
     ctx.contents.vars->Js_array2.copy
 }
@@ -505,6 +541,10 @@ let extractMandatoryHypotheses = (ctx:mmContext, mandatoryVars:Belt_HashSetInt.t
     res
 }
 
+let getAllConsts = (ctx:mmContext):array<string> => {
+    Belt_Option.getExn(ctx.contents.root).consts->Js_array2.sliceFrom(1)
+}
+
 let getMandHyps = (ctx:mmContext, expr:expr):array<hypothesis> => {
     let mandatoryVars = extractMandatoryVariables(ctx, expr, ())
     extractMandatoryHypotheses(ctx, mandatoryVars, ())
@@ -519,6 +559,15 @@ let getAllHyps = (ctx:mmContext):Belt_MapString.t<hypothesis> => {
     Belt_MapString.fromArray(hyps->Js_array2.map(hyp => (hyp.label, hyp)))
 }
 
+let getAllFramesArr = (ctx:mmContext):array<frame> => {
+    let frames = []
+    ctx.contents->forEachCtxInReverseOrder(ctx => {
+        frames->Js.Array2.pushMany(ctx.frames->Belt_HashMapString.valuesToArray)->ignore
+        None
+    })->ignore
+    frames
+}
+
 let getAllFrames = (ctx:mmContext):Belt_MapString.t<frame> => {
     let frames = []
     ctx.contents->forEachCtxInReverseOrder(ctx => {
@@ -526,10 +575,6 @@ let getAllFrames = (ctx:mmContext):Belt_MapString.t<frame> => {
         None
     })->ignore
     Belt_MapString.fromArray(frames)
-}
-
-let getAllFrameLabels = (ctx:mmContext):array<string> => {
-    (ctx.contents.root->Belt_Option.getExn).frameLabels->Js_array2.copy
 }
 
 let forEachFrame = (ctx:mmContext, consumer:frame => option<'a>):option<'a> => {
@@ -570,7 +615,7 @@ let findParentheses = (ctx:mmContext, ~onProgress:option<float=>unit>=?, ()):arr
     }
 
     let checkValidParens = (allExprs, openSym, closeSym):bool => {
-        open MM_parenCounter
+        open MM_parenCounter_unoptimized
         let res = ref(true)
         let openUsed = ref(false)
         let closeUsed = ref(false)
@@ -686,7 +731,11 @@ let createContext = (~parent:option<mmContext>=?, ~debug:bool=false, ()):mmConte
             varTypes: Belt_HashMapInt.make(~hintSize=4),
             lastComment: None,
             frames: Belt_HashMapString.make(~hintSize=1),
-            frameLabels:[],
+            totalNumOfFrames: switch pCtxContentsOpt {
+                | None => 0
+                | Some(parentCtx) => parentCtx.totalNumOfFrames
+            },
+            deprOrTranDeprFrms: Belt_HashSetString.make(~hintSize=1),
             debug: pCtxContentsOpt->Belt_Option.map(pCtx => pCtx.debug)->Belt.Option.getWithDefault(debug),
         }
     )
@@ -702,10 +751,13 @@ let openChildContext = (ctx:mmContext):unit => {
 }
 
 let closeChildContext = (ctx:mmContext):unit => {
-    ctx.contents = switch ctx.contents.parent {
+    let childCtx = ctx.contents
+    ctx.contents = switch childCtx.parent {
         | None => raise(MmException({msg:`Cannot close the root context.`}))
         | Some(parent) => {
-            ctx.contents.frames->Belt_HashMapString.forEach((k,v) => parent.frames->Belt_HashMapString.set(k,v))
+            parent.totalNumOfFrames = parent.totalNumOfFrames + childCtx.frames->Belt_HashMapString.size
+            childCtx.frames->Belt_HashMapString.forEach((k,v) => parent.frames->Belt_HashMapString.set(k,v))
+            childCtx.deprOrTranDeprFrms->Belt_HashSetString.forEach(parent.deprOrTranDeprFrms->Belt_HashSetString.add)
             parent
         }
     }
@@ -842,19 +894,67 @@ let renumberVarsInHypothesis = (ctxToFrameRenum: Belt_HashMapInt.t<int>, hyp: hy
 }
 
 let renumberVarsInDisj = (ctxToFrameRenum: Belt_HashMapInt.t<int>, disj:disjMutable): Belt_MapInt.t<Belt_SetInt.t> => {
-    disj
+    let res = disjMake()
+    disj->disjForEach((n,m) => {
+        res->disjAddPair(
+            ctxToFrameRenum->ctxIntToFrameInt(n),
+            ctxToFrameRenum->ctxIntToFrameInt(m)
+        )
+    })
+    res
         ->Belt_HashMapInt.toArray
         ->Js.Array2.map(((n,ms)) => {
             (
-                ctxToFrameRenum->ctxIntToFrameInt(n),
-                ctxToFrameRenum->renumberVarsInExpr(ms->Belt_HashSetInt.toArray)->Belt_SetInt.fromArray
+                n,
+                ms->Belt_HashSetInt.toArray->Belt_SetInt.fromArray
             )
         })
         ->Belt_MapInt.fromArray
 }
 
+let matchesOptRegex = (str:string, regex:option<Js_re.t>):bool => {
+    regex->Belt_Option.map(regex => regex->Js_re.test_(str))->Belt.Option.getWithDefault(false)
+}
+
+let isMatch = (
+    ~descr:option<string>,
+    ~label:string,
+    ~descrRegexToMatch:option<Js_re.t>,
+    ~labelRegexToMatch:option<Js_re.t>,
+):bool => {
+    descr->Belt.Option.map(matchesOptRegex(_,descrRegexToMatch))->Belt_Option.getWithDefault(false) 
+        || label->matchesOptRegex(labelRegexToMatch)
+}
+
+let isTranDepr = (
+    ~ctx:mmContext,
+    ~proof:option<proof>,
+):bool => {
+    switch proof {
+        | None => false
+        | Some(proof) => {
+            switch proof {
+                | Uncompressed({labels}) | Compressed({labels}) => {
+                    ctx.contents->forEachCtxInDeclarationOrder(ctx => {
+                        if (
+                            labels->Js_array2.some(label => {
+                                ctx.deprOrTranDeprFrms->Belt_HashSetString.has(label)
+                            })
+                        ) {
+                            Some(true)
+                        } else {
+                            None
+                        }
+                    })->Belt_Option.getWithDefault(false)
+                }
+            }
+        }
+    }
+}
+
 let createFrame = (
     ~ctx:mmContext,
+    ~ord:int,
     ~isAxiom:bool, 
     ~label:string, 
     ~exprStr:array<string>,
@@ -862,6 +962,10 @@ let createFrame = (
     ~tokenType:string="a frame",
     ~skipEssentials:bool=false, 
     ~skipFirstSymCheck:bool=false, 
+    ~descrRegexToDisc:option<Js_re.t>=?,
+    ~labelRegexToDisc:option<Js_re.t>=?,
+    ~descrRegexToDepr:option<Js_re.t>=?,
+    ~labelRegexToDepr:option<Js_re.t>=?,
     ()
 ):frame => {
     assertNameIsUnique(ctx,label,tokenType)
@@ -881,7 +985,9 @@ let createFrame = (
                 let ctxToFrameRenum = mandatoryVarsArr
                                         ->Js_array2.mapi((cv,fv) => (cv,fv))
                                         ->Belt_HashMapInt.fromArray
+                let descr = ctx.contents.lastComment
                 let frame = {
+                    ord,
                     isAxiom,
                     disj: ctxToFrameRenum->renumberVarsInDisj(mandatoryDisj),
                     hyps: mandatoryHypotheses->Js_array2.map(ctxToFrameRenum->renumberVarsInHypothesis),
@@ -891,8 +997,15 @@ let createFrame = (
                     varTypes: mandatoryVarsArr->Js_array2.map(ctx->getTypeOfVarExn),
                     numOfVars: mandatoryVarsArr->Js_array2.length,
                     numOfArgs: mandatoryHypotheses->Js_array2.length,
-                    descr: ctx.contents.lastComment,
+                    descr,
                     proof,
+                    isDisc: isMatch( 
+                        ~descr, ~label, ~descrRegexToMatch=descrRegexToDisc, ~labelRegexToMatch=labelRegexToDisc, 
+                    ),
+                    isDepr: isMatch( 
+                        ~descr, ~label, ~descrRegexToMatch=descrRegexToDepr, ~labelRegexToMatch=labelRegexToDepr, 
+                    ),
+                    isTranDepr: isTranDepr( ~ctx, ~proof, ),
                     dbg:
                         if (ctx.contents.debug) {
                             Some({
@@ -910,19 +1023,46 @@ let createFrame = (
     }
 }
 
-let addAssertion = ( ctx:mmContext, ~isAxiom:bool, ~label:string, ~exprStr:array<string>, ~proof:option<proof> ):unit => {
-    ctx.contents.frames->Belt_HashMapString.set(
-        label, 
-        createFrame(
-            ~ctx, ~isAxiom, ~label, ~exprStr, ~proof, 
-            ~tokenType = if (proof->Belt_Option.isNone) {"an axiom"} else {"a theorem"}, 
-            ()
-        )
+let addAssertion = (
+    ctx:mmContext, 
+    ~isAxiom:bool, 
+    ~label:string, 
+    ~exprStr:array<string>, 
+    ~proof:option<proof>,
+    ~descrRegexToDisc:option<Js_re.t>=?,
+    ~labelRegexToDisc:option<Js_re.t>=?,
+    ~descrRegexToDepr:option<Js_re.t>=?,
+    ~labelRegexToDepr:option<Js_re.t>=?,
+    ()
+):unit => {
+    let currCtx = ctx.contents
+    let frame = createFrame(
+        ~ctx, 
+        ~ord=currCtx.totalNumOfFrames,
+        ~isAxiom, ~label, ~exprStr, ~proof, 
+        ~tokenType = if (proof->Belt_Option.isNone) {"an axiom"} else {"a theorem"}, 
+        ~descrRegexToDisc?,
+        ~labelRegexToDisc?,
+        ~descrRegexToDepr?,
+        ~labelRegexToDepr?,
+        ()
     )
-    (ctx.contents.root->Belt_Option.getExn).frameLabels->Js_array2.push(label)->ignore
+    currCtx.frames->Belt_HashMapString.set( label, frame )
+    currCtx.totalNumOfFrames = currCtx.totalNumOfFrames + 1
+    if (frame.isDepr || frame.isTranDepr) {
+        currCtx.deprOrTranDeprFrms->Belt_HashSetString.add(label)
+    }
 }
 
-let applySingleStmt = (ctx:mmContext, stmt:stmt):unit => {
+let applySingleStmt = (
+    ctx:mmContext, 
+    stmt:stmt,
+    ~descrRegexToDisc:option<Js_re.t>=?,
+    ~labelRegexToDisc:option<Js_re.t>=?,
+    ~descrRegexToDepr:option<Js_re.t>=?,
+    ~labelRegexToDepr:option<Js_re.t>=?,
+    ()
+):unit => {
     switch stmt {
         | Comment({text}) => addComment(ctx, text)
         | Const({symbols}) => symbols->Js_array2.forEach(addConst(ctx, _))
@@ -931,8 +1071,18 @@ let applySingleStmt = (ctx:mmContext, stmt:stmt):unit => {
         | Disj({vars}) => addDisj(ctx, vars)
         | Floating({label, expr}) => addFloating(ctx, ~label, ~exprStr=expr)
         | Essential({label, expr}) => addEssential(ctx, ~label, ~exprStr=expr)
-        | Axiom({label, expr}) => addAssertion(ctx, ~isAxiom=true, ~label, ~exprStr=expr, ~proof=None)
-        | Provable({label, expr, proof}) => addAssertion(ctx, ~isAxiom=false, ~label, ~exprStr=expr, ~proof)
+        | Axiom({label, expr}) => {
+            addAssertion(
+                ctx, ~isAxiom=true, ~label, ~exprStr=expr, ~proof=None, 
+                ~descrRegexToDisc?, ~labelRegexToDisc?, ~descrRegexToDepr?, ~labelRegexToDepr?, ()
+            )
+        }
+        | Provable({label, expr, proof}) => {
+            addAssertion(
+                ctx, ~isAxiom=false, ~label, ~exprStr=expr, ~proof, 
+                ~descrRegexToDisc?, ~labelRegexToDisc?, ~descrRegexToDepr?, ~labelRegexToDepr?, ()
+            )
+        }
     }
 }
 
@@ -943,6 +1093,10 @@ let loadContext = (
     ~stopAfter="",
     ~onPreProcess: option<(mmContext,MM_parser.stmt)=>unit>=?,
     ~expectedNumOfAssertions=-1, 
+    ~descrRegexToDisc:option<Js_re.t>=?,
+    ~labelRegexToDisc:option<Js_re.t>=?,
+    ~descrRegexToDepr:option<Js_re.t>=?,
+    ~labelRegexToDepr:option<Js_re.t>=?,
     ~onProgress= _=>(), 
     ~debug:bool=false, 
     ()
@@ -991,7 +1145,11 @@ let loadContext = (
         ~process = (ctx,node) => {
             switch node {
                 | {stmt:Block(_)} => ()
-                | {stmt} => applySingleStmt(ctx,stmt)
+                | {stmt} => {
+                    applySingleStmt(
+                        ctx, stmt, ~descrRegexToDisc?, ~labelRegexToDisc?, ~descrRegexToDepr?, ~labelRegexToDepr?, ()
+                    )
+                }
             }
             None
         },
@@ -1015,7 +1173,7 @@ let loadContext = (
 let generateNewVarNames = (
     ~ctx:mmContext, 
     ~types:array<int>, 
-    ~typeToPrefix:Belt_MapString.t<string>,
+    ~typeToPrefix:Belt_MapString.t<string>=Belt_MapString.empty,
     ~reservedNames:option<Belt_HashSetString.t>=?,
     ()
 ): array<string> => {
@@ -1087,37 +1245,22 @@ let renumberConstsInExpr = (constRenum:Belt_HashMapInt.t<int>, expr:expr):unit =
     }
 }
 
-let moveConstsToBegin = (ctx:mmContext, constsStr:string):unit => {
+let moveConstsToBegin = (ctx:mmContext, firstConsts:array<int>):unit => {
     let rootCtx = ctx.contents.root->Belt_Option.getExn
-    let constsToMove = constsStr->getSpaceSeparatedValuesAsArray
-        ->Js_array2.map(ctx->ctxSymToInt)
-        ->Js.Array2.filter(intOpt => intOpt->Belt_Option.mapWithDefault(false, i => i < 0))
-        ->Js.Array2.map(Belt_Option.getExn)
-        ->Belt_HashSetInt.fromArray
-    let constsLen = constsToMove->Belt_HashSetInt.size
-
-    let constToMoveFar = ref(-1)
-    let getConstToMoveFar = () => {
-        while (constsToMove->Belt_HashSetInt.has(constToMoveFar.contents)) {
-            constToMoveFar.contents = constToMoveFar.contents - 1
+    let newConstOrder:array<int> = firstConsts->Js_array2.copy
+    for i in -1 downto -(rootCtx.consts->Js_array2.length-1) {
+        if (!(newConstOrder->Js_array2.includes(i))) {
+            newConstOrder->Js_array2.push(i)->ignore
         }
-        let res = constToMoveFar.contents
-        constToMoveFar.contents = constToMoveFar.contents - 1
-        res
     }
-    
-    let constRenum = Belt_HashMapInt.make(~hintSize=constsLen)
-    constsToMove->Belt_HashSetInt.forEach(constToMoveClose => {
-        if (constToMoveClose < -constsLen) {
-            let constToMoveFar = getConstToMoveFar()
-            constRenum->Belt_HashMapInt.set(constToMoveClose, constToMoveFar)
-            constRenum->Belt_HashMapInt.set(constToMoveFar, constToMoveClose)
-            let symTmp = rootCtx.consts[-constToMoveClose]
-            rootCtx.consts[-constToMoveClose] = rootCtx.consts[-constToMoveFar]
-            rootCtx.consts[-constToMoveFar] = symTmp
-            rootCtx.symToInt->Belt_HashMapString.set(rootCtx.consts[-constToMoveClose], constToMoveClose)
-            rootCtx.symToInt->Belt_HashMapString.set(rootCtx.consts[-constToMoveFar], constToMoveFar)
-        }
+    let oldConstOrder:array<string> = rootCtx.consts->Js.Array2.copy
+    let constRenum = Belt_HashMapInt.make(~hintSize=rootCtx.consts->Js.Array2.length)
+    newConstOrder->Js_array2.forEachi((symOldInt,i) => {
+        let sym = oldConstOrder[-symOldInt]
+        let symNewInt = -(i+1)
+        constRenum->Belt_HashMapInt.set(symOldInt, symNewInt)
+        rootCtx.consts[-symNewInt] = sym
+        rootCtx.symToInt->Belt_HashMapString.set(sym, symNewInt)
     })
 
     ctx->forEachHypothesisInDeclarationOrder(hyp => {
@@ -1145,22 +1288,38 @@ let moveConstsToBegin = (ctx:mmContext, constsStr:string):unit => {
     })->ignore
 }
 
-let rec ctxOptimizeForProverPriv = (ctx:mmContextContents):(mmContextContents, mmContextContents) => {
+let frameRemoveRedundantText = (
+    frame:frame,
+    ~removeAsrtDescr:bool,
+    ~removeProofs:bool,
+):frame => {
+    {
+        ...frame,
+        descr: if (removeAsrtDescr) {None} else {frame.descr},
+        proof: if (removeProofs) {None} else {frame.proof},
+    }
+}
+
+let rec ctxRemoveRedundantText = (
+    ctx:mmContextContents,
+    ~removeAsrtDescr:bool,
+    ~removeProofs:bool,
+):(mmContextContents, mmContextContents) => {
     let removeRedundantData = ctx => {
         {
             ...ctx,
-            lastComment: None,
+            lastComment: if (removeAsrtDescr) {None} else {ctx.lastComment},
             frames: ctx.frames->Belt_HashMapString.toArray->Js_array2.map(((label,frame)) => {
                 (
                     label,
-                    {
-                        ...frame,
-                        descr:None,
-                        proof:None,
-                    }
+                    frame->frameRemoveRedundantText(~removeAsrtDescr, ~removeProofs)
                 )
             })->Belt_HashMapString.fromArray,
-            frameLabels:[]
+            totalNumOfFrames: switch ctx.parent {
+                | None => ctx.frames->Belt_HashMapString.size
+                | Some(parent) => parent.totalNumOfFrames + ctx.frames->Belt_HashMapString.size
+            },
+            deprOrTranDeprFrms:Belt_HashSetString.make(~hintSize=0),
         }
     }
 
@@ -1171,7 +1330,7 @@ let rec ctxOptimizeForProverPriv = (ctx:mmContextContents):(mmContextContents, m
             (res, res)
         }
         | Some(parent) => {
-            let (newRoot, newParent) = ctxOptimizeForProverPriv(parent)
+            let (newRoot, newParent) = ctxRemoveRedundantText(parent, ~removeAsrtDescr, ~removeProofs)
             let res = {
                 ...removeRedundantData(ctx),
                 root: Some(newRoot),
@@ -1182,7 +1341,89 @@ let rec ctxOptimizeForProverPriv = (ctx:mmContextContents):(mmContextContents, m
     }
 }
 
-let ctxOptimizeForProver = (ctx:mmContext):mmContext => {
-    let (_,res) = ctx.contents->ctxOptimizeForProverPriv
-    ref(res)
+let sortBySym = (ctx:mmContext, expr:array<int>):array<int> => {
+    ctx->ctxIntsToSymsExn(expr)->Js.Array2.sortInPlace->ctxSymsToIntsExn(ctx, _)
+}
+
+let ctxGetOptimizedConstsOrder = (ctx:mmContext, ~parens:string):optimizedConstsOrder => {
+    let allConsts = Belt_HashSetInt.fromArray( ctx->ctxSymsToIntsExn( ctx->getAllConsts ) )
+    let numOfConsts = allConsts->Belt_HashSetInt.size
+
+    let canBeFirst = Belt_HashSetInt.make(~hintSize=numOfConsts)
+    let canBeLast = Belt_HashSetInt.make(~hintSize=numOfConsts)
+    ctx->forEachFrame(frame => {
+        let first = frame.asrt[1]
+        if (first < 0) {
+            canBeFirst->Belt_HashSetInt.add(first)
+        }
+        let last = frame.asrt[frame.asrt->Js_array2.length-1]
+        if (last < 0) {
+            canBeLast->Belt_HashSetInt.add(last)
+        }
+        None
+    })->ignore
+    let canBeFirstAndLast = canBeFirst->Belt_HashSetInt.toArray
+        ->Js.Array2.filter(canBeLast->Belt_HashSetInt.has)
+        ->Belt_HashSetInt.fromArray
+    canBeFirstAndLast->Belt_HashSetInt.forEach(canBeFirst->Belt_HashSetInt.remove)
+    canBeFirstAndLast->Belt_HashSetInt.forEach(canBeLast->Belt_HashSetInt.remove)
+
+    let parenInts = parens->getSpaceSeparatedValuesAsArray
+        ->Js_array2.map(ctx->ctxSymToInt)
+        ->Js.Array2.filter(intOpt => intOpt->Belt_Option.mapWithDefault(false, i => i < 0))
+        ->Js.Array2.map(Belt_Option.getExn)
+    parenInts->Js.Array2.forEach(i => {
+        canBeFirst->Belt_HashSetInt.remove(i)
+        canBeFirstAndLast->Belt_HashSetInt.remove(i)
+        canBeLast->Belt_HashSetInt.remove(i)
+    })
+
+    let remainingConsts = allConsts->Belt_HashSetInt.toArray->Js.Array2.filter(i => {
+        !(parenInts->Js.Array2.includes(i))
+        && !(canBeFirst->Belt_HashSetInt.has(i))
+        && !(canBeFirstAndLast->Belt_HashSetInt.has(i))
+        && !(canBeLast->Belt_HashSetInt.has(i))
+    })->Belt_HashSetInt.fromArray
+
+    let newConstsOrder = Belt_Array.concatMany([
+        parenInts,
+        canBeFirst->Belt_HashSetInt.toArray->sortBySym(ctx,_),
+        canBeFirstAndLast->Belt_HashSetInt.toArray->sortBySym(ctx,_),
+        canBeLast->Belt_HashSetInt.toArray->sortBySym(ctx,_),
+        remainingConsts->Belt_HashSetInt.toArray->sortBySym(ctx,_),
+    ])
+
+    let parenMin = -(parenInts->Js.Array2.length)
+
+    let canBeFirstMax = parenMin-1
+    let canBeFirstMin = canBeFirstMax - canBeFirst->Belt_HashSetInt.size + 1
+
+    let canBeFirstAndLastMax = canBeFirstMin-1
+    let canBeFirstAndLastMin = canBeFirstAndLastMax - canBeFirstAndLast->Belt_HashSetInt.size + 1
+
+    let canBeLastMax = canBeFirstAndLastMin-1
+    let canBeLastMin = canBeLastMax - canBeLast->Belt_HashSetInt.size + 1
+
+    {
+        allConsts:ctx->ctxIntsToSymsExn(newConstsOrder),
+        parenMin,
+        canBeFirstMin:canBeFirstAndLastMin,
+        canBeFirstMax:canBeFirstMax,
+        canBeLastMin,
+        canBeLastMax:canBeFirstAndLastMax,
+    }
+}
+
+let ctxOptimizeForProver = ( 
+    ctx:mmContext,
+    ~parens:string,
+    ~removeAsrtDescr:bool=true,
+    ~removeProofs:bool=true,
+    ()
+):mmContext => {
+    let (_,ctx) = ctx.contents->ctxRemoveRedundantText( ~removeAsrtDescr, ~removeProofs, )
+    let resCtx = ref(ctx)
+    let {allConsts} = resCtx->ctxGetOptimizedConstsOrder(~parens)
+    resCtx->moveConstsToBegin(resCtx->ctxSymsToIntsExn(allConsts))
+    resCtx
 }

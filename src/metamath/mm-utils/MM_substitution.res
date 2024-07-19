@@ -45,6 +45,12 @@ type frmSubsData = {
     subs:subs,
 }
 
+type frms = {
+    all: array<frmSubsData>,
+    byType:Belt_HashMapInt.t<array<frmSubsData>>,
+    byLabel:Belt_HashMapString.t<frmSubsData>,
+}
+
 let subsClone = subs => {
     {
         size: subs.size,
@@ -197,31 +203,44 @@ let rec iterateConstParts = (
     if (exprLen < frmExprLen) {
         Continue
     } else if (idxToMatch == frmConstParts.length) {
-        if (frmConstParts.length > 0 && constParts.ends[idxToMatch-1] != exprLen-1) {
-            if (frmConstParts.ends[idxToMatch-1] == frmExprLen-1) {
-                Continue
-            } else {
-                let frmRemainingGapLength = lengthOfGap2(idxToMatch-1, frmConstParts, frmExprLen)
-                let remainingGapLength = lengthOfGap2(idxToMatch-1, constParts, exprLen)
-                if (remainingGapLength < frmRemainingGapLength) {
+        if (frmConstParts.length > 0) {
+            if (constParts.ends[idxToMatch-1] != exprLen-1) {
+                if (frmConstParts.ends[idxToMatch-1] == frmExprLen-1) {
                     Continue
                 } else {
-                    parenCnt->parenCntReset
-                    let pState = ref(Balanced)
-                    let i = ref(constParts.ends[idxToMatch-1]+1)
-                    while (i.contents < exprLen && pState.contents != Failed) {
-                        pState.contents = parenCnt->parenCntPut(expr[i.contents])
-                        i.contents = i.contents + 1
-                    }
-                    if (pState.contents == Balanced) {
-                        consumer(constParts)
-                    } else {
+                    let frmRemainingGapLength = lengthOfGap2(idxToMatch-1, frmConstParts, frmExprLen)
+                    let remainingGapLength = lengthOfGap2(idxToMatch-1, constParts, exprLen)
+                    if (remainingGapLength < frmRemainingGapLength) {
                         Continue
+                    } else {
+                        if (
+                            !(parenCnt->parenCntCanBeFirst(expr[constParts.ends[idxToMatch-1]+1]))
+                            || !(parenCnt->parenCntCanBeLast(expr[exprLen-1]))
+                        ) {
+                            Continue
+                        } else {
+                            parenCnt->parenCntReset
+                            let pState = ref(Balanced)
+                            let i = ref(constParts.ends[idxToMatch-1]+1)
+                            while (i.contents < exprLen && pState.contents != Failed) {
+                                pState.contents = parenCnt->parenCntPut(expr[i.contents])
+                                i.contents = i.contents + 1
+                            }
+                            if (pState.contents == Balanced) {
+                                consumer(constParts)
+                            } else {
+                                Continue
+                            }
+                        }
                     }
                 }
+            } else {
+                consumer(constParts)
             }
-        } else {
+        } else if (parenCnt->parenCntCanBeFirst(expr[0]) && parenCnt->parenCntCanBeLast(expr[exprLen-1])) {
             consumer(constParts)
+        } else {
+            Continue
         }
     } else if (idxToMatch == 0 && frmConstParts.begins[0] == 0) {
         if (exprLen-1 < frmConstParts.ends[0]) {
@@ -239,9 +258,13 @@ let rec iterateConstParts = (
             switch res.contents {
                 | Some(instr) => instr
                 | None => {
-                    constParts.begins[0] = 0
-                    constParts.ends[0] = maxI
-                    invokeNext()
+                    if (maxI == exprLen-1 || parenCnt->parenCntCanBeFirst(expr[maxI+1])) {
+                        constParts.begins[0] = 0
+                        constParts.ends[0] = maxI
+                        invokeNext()
+                    } else {
+                        Continue
+                    }
                 }
             }
         }
@@ -265,9 +288,14 @@ let rec iterateConstParts = (
                     cmpRes.contents = frmExpr[frmConstParts.begins[idxToMatch]+matchedLen.contents] == expr[begin.contents+matchedLen.contents]
                     matchedLen.contents = matchedLen.contents + 1
                 }
-                if (matchedLen.contents == partLen && cmpRes.contents) {
+                let end = begin.contents+partLen-1
+                if (
+                    matchedLen.contents == partLen && cmpRes.contents
+                    && parenCnt->parenCntCanBeLast(expr[begin.contents-1])
+                    && (end == exprLen-1 || parenCnt->parenCntCanBeFirst(expr[end+1]))
+                ) {
                     constParts.begins[idxToMatch] = begin.contents
-                    constParts.ends[idxToMatch] = begin.contents+partLen-1
+                    constParts.ends[idxToMatch] = end
                     instr.contents = invokeNext()
                     parenCnt->parenCntReset
                 }
@@ -345,15 +373,7 @@ let initVarGroups = (~varGroups:array<varGroup>, ~constParts:constParts, ~expr:e
                 grp.exprEndIdx = constParts.begins[grp.leftConstPartIdx+1]-1
             }
         })
-        varGroups->Js.Array2.sortInPlaceWith((g1,g2) => {
-            if (g1.numOfVars < g2.numOfVars) {
-                -1
-            } else if (g1.numOfVars == g2.numOfVars) {
-                0
-            } else {
-                1
-            }
-        })->ignore
+        varGroups->Js.Array2.sortInPlaceWith((g1,g2) => g1.numOfVars - g2.numOfVars)->ignore
     }
 }
 
@@ -407,7 +427,7 @@ let rec iterateVarGroups = (
         if (curVarIdx == grp.numOfVars-1) {
             subs.ends[frmVar] = grp.exprEndIdx
             continueInstr.contents = invokeNext(maxSubExprLength)
-        } else {
+        } else if (parenCnt->parenCntCanBeFirst(expr[subExprBeginIdx])) {
             let subExprLength = ref(1)
             let end = ref(subExprBeginIdx)
             parenCnt->parenCntReset
@@ -415,7 +435,7 @@ let rec iterateVarGroups = (
             while (subExprLength.contents <= maxSubExprLength && continueInstr.contents == Continue && pStatus.contents != Failed) {
                 subs.ends[frmVar] = end.contents
                 pStatus.contents = parenCnt->parenCntPut(expr[end.contents])
-                if (pStatus.contents == Balanced) {
+                if (pStatus.contents == Balanced && parenCnt->parenCntCanBeLast(expr[end.contents])) {
                     continueInstr.contents = invokeNext(subExprLength.contents)
                     parenCnt->parenCntReset
                 }
@@ -453,7 +473,7 @@ let iterateSubstitutions = (
     ~consumer: subs => contunieInstruction
 ):contunieInstruction => {
     if (subs.size == 0) {
-        if (frmExpr == expr) {
+        if (frmExpr->exprEq(expr)) {
             consumer(subs)
         } else {
             Continue
@@ -461,34 +481,44 @@ let iterateSubstitutions = (
     } else {
         let exprLen = expr->Js_array2.length
         let frmExprLen = frmExpr->Js_array2.length
-        if (exprLen < frmExprLen) {
+        if (exprLen < frmExprLen || exprLen == 0 || frmExprLen == 0) {
             Continue
         } else {
-            iterateConstParts(
-                ~frmExpr, 
-                ~expr, 
-                ~frmConstParts, 
-                ~constParts, 
-                ~idxToMatch=0,
-                ~parenCnt,
-                ~consumer = constParts => {
-                    if (varGroups->Js.Array2.length > 0) {
-                        initVarGroups(~varGroups, ~constParts, ~expr)
-                        iterateVarGroups(
-                            ~expr,
-                            ~subs,
-                            ~varGroups,
-                            ~curGrpIdx = 0,
-                            ~curVarIdx = 0,
-                            ~subExprBeginIdx = varGroups[0].exprBeginIdx,
-                            ~parenCnt,
-                            ~consumer
-                        )
-                    } else {
-                        consumer(subs)
-                    }
+            let frmExprEnd = frmExpr->Js_array2.unsafe_get(frmExprLen-1)
+            if (frmExprEnd < 0 && frmExprEnd != expr->Js_array2.unsafe_get(exprLen-1)) {
+                Continue
+            } else {
+                let frmExprBegin = frmExpr->Js_array2.unsafe_get(0)
+                if (frmExprBegin < 0 && frmExprBegin != expr->Js_array2.unsafe_get(0)) {
+                    Continue
+                } else {
+                    iterateConstParts(
+                        ~frmExpr, 
+                        ~expr, 
+                        ~frmConstParts, 
+                        ~constParts, 
+                        ~idxToMatch=0,
+                        ~parenCnt,
+                        ~consumer = constParts => {
+                            if (varGroups->Js.Array2.length > 0) {
+                                initVarGroups(~varGroups, ~constParts, ~expr)
+                                iterateVarGroups(
+                                    ~expr,
+                                    ~subs,
+                                    ~varGroups,
+                                    ~curGrpIdx = 0,
+                                    ~curVarIdx = 0,
+                                    ~subExprBeginIdx = varGroups[0].exprBeginIdx,
+                                    ~parenCnt,
+                                    ~consumer
+                                )
+                            } else {
+                                consumer(subs)
+                            }
+                        }
+                    )
                 }
-            )
+            }
         }
     }
 }
@@ -502,24 +532,6 @@ let createSubs = (~numOfVars:int) => {
         isDefined: Belt_Array.make(numOfVars, false),
     }
 }
-
-//let numberOfStates = (numOfVars, subExprLength) => {
-    //let n = subExprLen - 1
-    //let k = numOfVars - 1
-
-    //let res = ref(1)
-    //let rem = ref(2)
-    //let minI = n-k+1
-    //for i in minI to n {
-        //res.contents = Js.Math.imul(res.contents, i)
-    //}
-//}
-
-//let numberOfStates = varGroup => {
-    //let subExprLen = varGroup.exprEndIdx-varGroup.exprBeginIdx+1
-    //let n = subExprLen - 1
-    //let k = 
-//}
 
 let prepareFrmSubsDataForFrame = (frame):frmSubsData => {
     let hypsE = frame.hyps->Js.Array2.filter(hyp => hyp.typ == E)
@@ -546,7 +558,7 @@ let prepareFrmSubsDataForFrame = (frame):frmSubsData => {
 
     let subs = createSubs(~numOfVars=frame.numOfVars)
     {
-        frame,
+        frame:frame,
         hypsE,
         numOfHypsE: hypsE->Js.Array2.length,
         frmConstParts:frmConstPartsArr,
@@ -557,18 +569,27 @@ let prepareFrmSubsDataForFrame = (frame):frmSubsData => {
 }
 
 let prepareFrmSubsData = (
-    ~ctx:mmContext, 
-    ~asrtsToSkip:Belt_HashSetString.t=Belt_HashSetString.make(~hintSize=0),
+    ~ctx:mmContext,
     ()
-):Belt_MapString.t<frmSubsData> => {
-    let frms = []
-    ctx->forEachFrame(frame => {
-        if (!(asrtsToSkip->Belt_HashSetString.has(frame.label))) {
-            frms->Js_array2.push(prepareFrmSubsDataForFrame(frame))->ignore
+):frms => {
+    let frmCmp = comparatorBy(frm => frm.hypsE->Js_array2.length)
+        ->comparatorAndThen(comparatorBy(frm => frm.frame.ord))
+    let all = ctx->getAllFramesArr->Js.Array2.map(prepareFrmSubsDataForFrame)->Js_array2.sortInPlaceWith(frmCmp)
+    let byLabel = Belt_HashMapString.make(~hintSize=1000)
+    let byType = Belt_HashMapInt.make(~hintSize=16)
+    all->Js_array2.forEach(frm => {
+        byLabel->Belt_HashMapString.set(frm.frame.label, frm)
+        let typ = frm.frame.asrt[0]
+        switch byType->Belt_HashMapInt.get(typ) {
+            | None => byType->Belt_HashMapInt.set(typ,[frm])
+            | Some(arr) => arr->Js_array2.push(frm)->ignore
         }
-        None
-    })->ignore
-    Belt_MapString.fromArray(frms->Js_array2.map(frm => (frm.frame.label, frm)))
+    })
+    {
+        all,
+        byLabel,
+        byType,
+    }
 }
 
 let applySubs = (~frmExpr:expr, ~subs:subs, ~createWorkVar:int=>int): expr => {
@@ -668,13 +689,62 @@ let verifyDisjoints = (
     res.contents
 }
 
+let frmsEmpty = ():frms => {
+    {
+        all: [],
+        byType: Belt_HashMapInt.make(~hintSize=0),
+        byLabel:Belt_HashMapString.make(~hintSize=0),
+    }
+}
+let frmsSize = frms => frms.all->Js_array2.length
+let frmsForEach = (frms:frms, ~typ:option<int>=?, consumer:frmSubsData=>unit):unit => {
+    switch typ {
+        | None => frms.all->Js_array2.forEach(consumer)
+        | Some(typ) => frms.byType->Belt_HashMapInt.get(typ)->Belt.Option.forEach(Js_array2.forEach(_, consumer))
+    }
+}
+let frmsSelect = (frms:frms, ~typ:option<int>=?, ~label:option<string>=?, ()):array<frmSubsData> => {
+    switch typ {
+        | None => {
+            switch label {
+                | None => frms.all->Js.Array2.copy
+                | Some(label) => {
+                    switch frms.byLabel ->Belt_HashMapString.get(label) {
+                        | None => []
+                        | Some(frm) => [frm]
+                    }
+                }
+            }
+        }
+        | Some(typ) => {
+            switch label {
+                | None => {
+                    switch frms.byType->Belt_HashMapInt.get(typ) {
+                        | None => []
+                        | Some(arr) => arr->Js_array2.copy
+                    }
+                }
+                | Some(label) => {
+                    switch frms.byLabel->Belt_HashMapString.get(label)->Belt.Option.keep(frm=>frm.frame.asrt[0]==typ) {
+                        | None => []
+                        | Some(frm) => [frm]
+                    }
+                }
+            }
+        }
+    }
+}
+let frmsGetByLabel = (frms:frms, label:string):option<frmSubsData> => {
+    frms.byLabel->Belt_HashMapString.get(label)
+}
+let frmsGetAllTypes = (frms):array<int> => frms.byType->Belt_HashMapInt.keysToArray
+
 //------------------------- TEST ---------------------------
 
-let test_iterateConstParts: (~ctx:mmContext, ~frmExpr:expr, ~expr:expr, ~parens:string) => (array<(int,int)>, array<array<(int,int)>>) = (~ctx,~frmExpr,~expr, ~parens) => {
+let test_iterateConstParts = (~frmExpr:expr, ~expr:expr, ~parenCnt:parenCnt):(array<(int,int)>, array<array<(int,int)>>) => {
     let constPartsToArr = (constParts:constParts) => {
         constParts.begins->Js_array2.mapi((b,i)=>(b,constParts.ends[i]))
     }
-    let parenCnt = parenCntMake(ctx->ctxStrToIntsExn(parens), ())
     let frmConstParts = createConstParts(frmExpr)
     let constParts = createMatchingConstParts(frmConstParts)
     let matchingConstParts = []
@@ -698,8 +768,7 @@ let test_iterateConstParts: (~ctx:mmContext, ~frmExpr:expr, ~expr:expr, ~parens:
     )
 }
 
-let test_iterateSubstitutions: (~ctx:mmContext, ~frmExpr:expr, ~expr:expr, ~parens:string) => array<array<expr>> = (~ctx, ~frmExpr, ~expr, ~parens) => {
-    let parenCnt = parenCntMake(ctx->ctxStrToIntsExn(parens), ())
+let test_iterateSubstitutions = (~frmExpr:expr, ~expr:expr, ~parenCnt:parenCnt):array<array<expr>> => {
     let frmConstParts = createConstParts(frmExpr)
     let constParts = createMatchingConstParts(frmConstParts)
     let varGroups = createVarGroups(~frmExpr, ~frmConstParts)

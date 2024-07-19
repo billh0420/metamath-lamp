@@ -45,12 +45,8 @@ let lineToVarDef = (line:string):result<array<string>,string> => {
     }
 }
 
-let newLineRegex = %re("/[\n\r]/")
 let textToVarDefs = (text:string):result<array<array<string>>,string> => {
-    let varLines = text
-        ->Js_string2.splitByRe(newLineRegex)
-        ->Js_array2.map(strOpt => strOpt->Belt_Option.getWithDefault("")->Js_string2.trim)
-        ->Js_array2.filter(str => str->Js_string2.length > 0)
+    let varLines = text->multilineTextToNonEmptyLines
     if (varLines->Js.Array2.length == 0) {
         Ok([])
     } else {
@@ -80,8 +76,8 @@ let parseVariables = (wrkCtx, varsText):option<wrkCtxErr> => {
         | Ok(varDefs) => {
             try {
                 varDefs->Js_array2.forEach(varDef => {
-                    wrkCtx->applySingleStmt(Var({symbols:[varDef[2]]}))
-                    wrkCtx->applySingleStmt(Floating({label:varDef[0], expr:[varDef[1], varDef[2]]}))
+                    wrkCtx->applySingleStmt(Var({symbols:[varDef[2]]}), ())
+                    wrkCtx->applySingleStmt(Floating({label:varDef[0], expr:[varDef[1], varDef[2]]}), ())
                 })
                 None
             } catch {
@@ -92,7 +88,7 @@ let parseVariables = (wrkCtx, varsText):option<wrkCtxErr> => {
 }
 
 let addDisjFromString = (wrkCtx, disjStr) => {
-    wrkCtx->applySingleStmt(Disj({vars:disjStr->Js.String2.split(",")->Js_array2.map(Js_string2.trim)}))
+    wrkCtx->applySingleStmt(Disj({vars:disjStr->Js.String2.split(",")->Js_array2.map(Js_string2.trim)}), ())
 }
 
 let parseDisjoints = (wrkCtx, disjText):option<wrkCtxErr> => {

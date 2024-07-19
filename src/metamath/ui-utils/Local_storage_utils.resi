@@ -13,4 +13,6 @@ let useStateFromLocalStorage: (
     ~toString:'a=>string,
 ) => ('a, ('a=>'a) => unit)
 
-let useStateFromLocalStorageBool: (string,bool) => (bool, (bool=>bool) => unit)
+let useStateFromLocalStorageBool: (~key:string,~default:bool) => (bool, (bool=>bool) => unit)
+let useStateFromLocalStorageStr: (~key:string,~default:string) => (string, (string=>string) => unit)
+let useStateFromLocalStorageInt: (~key:string,~default:int) => (int, (int=>int) => unit)

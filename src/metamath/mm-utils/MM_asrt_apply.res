@@ -3,23 +3,23 @@ open MM_context
 open MM_parenCounter
 open MM_progress_tracker
 open MM_unification_debug
+open MM_parser
 
 type applyAssertionResult = {
     newVars: array<int>,
     newVarTypes: array<int>,
-    newDisj:disjMutable,
-    asrtLabel: string,
+    frame: frame,
     subs: subs,
     err:option<unifErr>,
 }
 
 let applyAssertionResultEq = (a:applyAssertionResult, b:applyAssertionResult):bool => {
-    a.err->Belt_Option.isNone && b.err->Belt_Option.isNone && a.asrtLabel == b.asrtLabel && subsEq(a.subs, b.subs)
+    a.err->Belt_Option.isNone && b.err->Belt_Option.isNone && a.frame.label == b.frame.label && subsEq(a.subs, b.subs)
 }
 
 let applyAssertionResultHash = (a:applyAssertionResult):int => {
     Expln_utils_common.hash2(
-        Expln_utils_common.hashStr(a.asrtLabel),
+        Expln_utils_common.hashStr(a.frame.label),
         subsHash(a.subs)
     )
 }
@@ -214,6 +214,51 @@ let iterateSubstitutionsWithWorkVars = (
     res
 }
 
+let getNextNonBlankIdx = (hypIdx:int, comb:array<int>):option<int> => {
+    let idx = ref(hypIdx+1)
+    while (idx.contents < comb->Js_array2.length && comb[idx.contents] < 0) {
+        idx := idx.contents + 1
+    }
+    if (idx.contents < comb->Js_array2.length && comb[idx.contents] >= 0) {
+        Some(idx.contents)
+    } else {
+        None
+    }
+}
+
+let getNextBlankIdx = (hypIdx:int, comb:array<int>):option<int> => {
+    let idx = ref(hypIdx+1)
+    while (idx.contents < comb->Js_array2.length && comb[idx.contents] >= 0) {
+        idx := idx.contents + 1
+    }
+    if (idx.contents < comb->Js_array2.length && comb[idx.contents] < 0) {
+        Some(idx.contents)
+    } else {
+        None
+    }
+}
+
+let getNextHypIdxToMatch = (hypIdx:int, comb:array<int>):int => {
+    if (hypIdx >= comb->Js_array2.length) {
+        raise(MmException({msg:`getNextHypIdxToMatch: hypIdx >= comb->Js_array2.length`}))
+    } else if (hypIdx < 0 || comb[hypIdx] >= 0) {
+        switch getNextNonBlankIdx(hypIdx, comb) {
+            | Some(idx) => idx
+            | None => {
+                switch getNextBlankIdx(-1, comb) {
+                    | Some(idx) => idx
+                    | None => comb->Js_array2.length
+                }
+            }
+        }
+    } else {
+        switch getNextBlankIdx(hypIdx, comb) {
+            | Some(idx) => idx
+            | None => comb->Js_array2.length
+        }
+    }
+}
+
 let rec iterateSubstitutionsForHyps = (
     ~workVars:workVars,
     ~frm:frmSubsData,
@@ -272,7 +317,7 @@ let rec iterateSubstitutionsForHyps = (
                     ~statements,
                     ~allowNewVars,
                     ~comb,
-                    ~hypIdx = hypIdx+1,
+                    ~hypIdx = hypIdx->getNextHypIdxToMatch(comb),
                     ~debugLevel,
                     ~onMatchFound,
                     ~onErrFound,
@@ -300,7 +345,7 @@ let rec iterateSubstitutionsForHyps = (
                     ~statements,
                     ~allowNewVars,
                     ~comb,
-                    ~hypIdx = hypIdx+1,
+                    ~hypIdx = hypIdx->getNextHypIdxToMatch(comb),
                     ~debugLevel,
                     ~onMatchFound,
                     ~onErrFound,
@@ -322,27 +367,14 @@ let checkDisj = (
     ~allowNewDisjForExistingVars:bool,
     ~isDisjInCtx:(int,int)=>bool,
     ~debugLevel:int,
-):result<disjMutable,unifErr> => {
-    let resultDisj = disjMake()
-    let verifRes = verifyDisjoints(~frmDisj, ~subs, ~debugLevel, ~isDisjInCtx = (n,m) => {
+):option<unifErr> => {
+    verifyDisjoints(~frmDisj, ~subs, ~debugLevel, ~isDisjInCtx = (n,m) => {
         if (n <= maxCtxVar && m <= maxCtxVar) {
-            if (isDisjInCtx(n,m)) {
-                true
-            } else if (allowNewDisjForExistingVars) {
-                resultDisj->disjAddPair(n,m)
-                true
-            } else {
-                false
-            }
+            isDisjInCtx(n,m) || allowNewDisjForExistingVars
         } else {
-            resultDisj->disjAddPair(n,m)
             true
         }
     })
-    switch verifRes {
-        | None => Ok(resultDisj)
-        | Some(err) => Error(err)
-    }
 }
 
 let iterateSubstitutionsForResult = (
@@ -370,7 +402,7 @@ let iterateSubstitutionsForResult = (
 
 let applyAssertions = (
     ~maxVar:int,
-    ~frms:Belt_MapString.t<frmSubsData>,
+    ~frms:array<frmSubsData>,
     ~isDisjInCtx:(int,int)=>bool,
     ~statements:array<expr>,
     ~exactOrderOfStmts:bool=false,
@@ -385,7 +417,7 @@ let applyAssertions = (
     ~onProgress:option<float=>unit>=?,
     ()
 ):unit => {
-    let sendNoUnifForAsrt = (frm):contunieInstruction => {
+    let sendNoUnifForAsrt = (frm:frmSubsData):contunieInstruction => {
         switch result {
             | None => Continue
             | Some(expr) => {
@@ -393,8 +425,7 @@ let applyAssertions = (
                     {
                         newVars: [],
                         newVarTypes: [],
-                        newDisj: disjMake(),
-                        asrtLabel: frm.frame.label,
+                        frame: frm.frame,
                         subs: subsClone(frm.subs),
                         err:Some(NoUnifForAsrt({asrtExpr:frm.frame.asrt, expr}))
                     }
@@ -404,12 +435,12 @@ let applyAssertions = (
     }
 
     let numOfStmts = statements->Js_array2.length
-    let numOfFrames = frms->Belt_MapString.size->Belt_Int.toFloat
+    let numOfFrames = frms->Js_array2.length->Belt_Int.toFloat
     let progressState = progressTrackerMake(~step=0.01, ~onProgress?, ())
     let framesProcessed = ref(0.)
     let continueInstr = ref(Continue)
     let sentValidResults = Belt_HashSet.make(~hintSize=16, ~id=module(ApplyAssertionResultHash))
-    frms->Belt_MapString.forEach((_,frm) => {
+    frms->Js_array2.forEach(frm => {
         if ( continueInstr.contents == Continue && frameFilter(frm.frame) ) {
             if (result->Belt.Option.map(result => result[0] != frm.frame.asrt[0])->Belt_Option.getWithDefault(false)) {
                 if (debugLevel >= 2) {
@@ -451,8 +482,7 @@ let applyAssertions = (
                                     {
                                         newVars: [],
                                         newVarTypes: [],
-                                        newDisj: disjMake(),
-                                        asrtLabel: frm.frame.label,
+                                        frame: frm.frame,
                                         subs: subsClone(frm.subs),
                                         err: Some(err)
                                     }
@@ -466,15 +496,14 @@ let applyAssertions = (
                                     ~statements,
                                     ~allowNewVars,
                                     ~comb,
-                                    ~hypIdx=0,
+                                    ~hypIdx=getNextHypIdxToMatch(-1, comb),
                                     ~debugLevel,
                                     ~onErrFound = err => {
                                         onMatchFound(
                                             {
                                                 newVars: [],
                                                 newVarTypes: [],
-                                                newDisj: disjMake(),
-                                                asrtLabel: frm.frame.label,
+                                                frame: frm.frame,
                                                 subs: subsClone(frm.subs),
                                                 err: Some(err)
                                             }
@@ -489,12 +518,11 @@ let applyAssertions = (
                                             ~allowNewDisjForExistingVars,
                                             ~debugLevel,
                                         ) {
-                                            | Ok(newDisj) => {
+                                            | None => {
                                                 let res = {
                                                     newVars: workVars.newVars->Js.Array2.copy,
                                                     newVarTypes: workVars.newVarTypes->Js.Array2.copy,
-                                                    newDisj,
-                                                    asrtLabel: frm.frame.label,
+                                                    frame: frm.frame,
                                                     subs: subsClone(frm.subs),
                                                     err:None
                                                 }
@@ -505,15 +533,14 @@ let applyAssertions = (
                                                     Continue
                                                 }
                                             }
-                                            | Error(err) => {
+                                            | Some(err) => {
                                                 if (debugLevel == 0) {
                                                     Continue
                                                 } else {
                                                     let res = {
                                                         newVars: workVars.newVars->Js.Array2.copy,
                                                         newVarTypes: workVars.newVarTypes->Js.Array2.copy,
-                                                        newDisj: disjMake(),
-                                                        asrtLabel: frm.frame.label,
+                                                        frame: frm.frame,
                                                         subs: subsClone(frm.subs),
                                                         err:Some(err)
                                                     }

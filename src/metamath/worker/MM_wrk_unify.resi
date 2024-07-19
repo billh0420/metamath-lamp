@@ -18,11 +18,12 @@ let unify: (
     ~disjText: string,
     ~rootStmts: array<rootStmt>,
     ~bottomUpProverParams: option<MM_provers.bottomUpProverParams>,
+    ~allowedFrms:allowedFrms,
     ~syntaxTypes:option<array<int>>,
     ~exprsToSyntaxCheck:option<array<expr>>,
     ~debugLevel:int,
     ~onProgress: string => unit,
-) => Expln_utils_promise.promise<MM_proof_tree_dto.proofTreeDto>
+) => promise<MM_proof_tree_dto.proofTreeDto>
 
 let processOnWorkerSide: (~req: request, ~sendToClient: response => unit) => unit
 

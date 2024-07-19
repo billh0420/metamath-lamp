@@ -45,6 +45,9 @@ type state = {
     allowNewDisjForExistingVars: bool,
     allowNewStmts: bool,
     allowNewVars: bool,
+    useDisc:bool,
+    useDepr:bool,
+    useTranDepr:bool,
     debugLevel:int,
     maxNumberOfBranchesStr:string,
 
@@ -94,14 +97,14 @@ let exprMayMatchAsrt = (
 }
 
 let getAvailableAsrtLabels = (
-    ~frms: Belt_MapString.t<frmSubsData>, 
+    ~frms: frms, 
     ~parenCnt: parenCnt, 
     ~exprToProve:expr,
 ) => {
     let availableAsrtLabels = []
-    frms->Belt_MapString.forEach((label,frm) => {
+    frms->frmsForEach(frm => {
         if ( exprMayMatchAsrt(~expr=exprToProve, ~frm, ~parenCnt) ) {
-            availableAsrtLabels->Js_array2.push(label)->ignore
+            availableAsrtLabels->Js_array2.push(frm.frame.label)->ignore
         }
     })
     availableAsrtLabels
@@ -109,10 +112,11 @@ let getAvailableAsrtLabels = (
 
 let makeInitialState = (
     ~rootUserStmts: array<userStmt>,
-    ~frms: Belt_MapString.t<frmSubsData>,
+    ~frms: frms,
     ~parenCnt: parenCnt,
     ~initialParams: option<bottomUpProverParams>,
     ~initialDebugLevel: option<int>,
+    ~allowedFrms:allowedFrms,
 ) => {
     let rootStmts = rootUserStmts->Js.Array2.map(userStmtToRootStmt)
     let rootStmtsLen = rootStmts->Js_array2.length
@@ -165,6 +169,9 @@ let makeInitialState = (
         allowNewDisjForExistingVars: params.allowNewDisjForExistingVars,
         allowNewStmts: params.allowNewStmts,
         allowNewVars: params.allowNewVars,
+        useDisc:allowedFrms.inEssen.useDisc,
+        useDepr:allowedFrms.inEssen.useDepr,
+        useTranDepr:allowedFrms.inEssen.useTranDepr,
         debugLevel: initialDebugLevel
             ->Belt_Option.map(lvl => if (0 <= lvl && lvl <= 2) {lvl} else {0})->Belt_Option.getWithDefault(0),
         maxNumberOfBranchesStr: 
@@ -224,6 +231,10 @@ let toggleAllowNewVars = (st) => {
     }
 }
 
+let toggleUseDisc = (st) => { ...st, useDisc: !st.useDisc }
+let toggleUseDepr = (st) => { ...st, useDepr: !st.useDepr }
+let toggleUseTranDepr = (st) => { ...st, useTranDepr: !st.useTranDepr }
+
 let setDebugLevel = (st,debugLevel) => {
     {
         ...st,
@@ -255,7 +266,7 @@ let isStmtToShow = (
         | Some(None) => stmt.jstf->Belt_Option.isSome
         | Some(Some(rootJstf)) => {
             switch stmt.jstf {
-                | None => true
+                | None => false
                 | Some(foundJstf) => !(rootJstf->jstfEq(foundJstf))
             }
         }
@@ -263,9 +274,10 @@ let isStmtToShow = (
 }
 
 let stmtsDtoToResultRendered = (
-    stmtsDto:stmtsDto, 
-    idx:int,
-    isStmtToShow:stmtDto=>bool
+    ~stmtsDto:stmtsDto, 
+    ~idx:int,
+    ~isStmtToShow:stmtDto=>bool,
+    ~getFrmLabelBkgColor: string=>option<string>,
 ):resultRendered => {
     let elem = 
         <Col>
@@ -293,9 +305,23 @@ let stmtsDtoToResultRendered = (
                                             switch stmt.jstf {
                                                 | None => React.null
                                                 | Some({args, label}) => {
-                                                    React.string(
-                                                        "[" ++ args->Js_array2.joinWith(" ") ++ " : " ++ label ++ " ]"
-                                                    )
+                                                    <>
+                                                        <span>
+                                                            {React.string("[" ++ args->Js_array2.joinWith(" ") ++ " : ")}
+                                                        </span>
+                                                        <span
+                                                            style=ReactDOM.Style.make(
+                                                                ~backgroundColor=?getFrmLabelBkgColor(label), 
+                                                                ~borderRadius="3px",
+                                                                ()
+                                                            )
+                                                        >
+                                                            {React.string(label)}
+                                                        </span>
+                                                        <span>
+                                                            {React.string(" ]")}
+                                                        </span>
+                                                    </>
                                                 }
                                             }
                                         }
@@ -356,7 +382,12 @@ let sortResultsRendered = (resultsRendered, sortBy) => {
     )
 }
 
-let setResults = (st,tree,results) => {
+let setResults = (
+    st,
+    ~tree: option<proofTreeDto>,
+    ~results: option<array<stmtsDto>>,
+    ~getFrmLabelBkgColor: string=>option<string>,
+) => {
     switch results {
         | None => {
             {
@@ -375,7 +406,11 @@ let setResults = (st,tree,results) => {
                 ->Js_array2.map(stmt => (stmt.expr, stmt.jstf))
                 ->Belt_HashMap.fromArray(~id=module(ExprHash))
             let isStmtToShow = stmt => isStmtToShow(~stmt, ~rootJstfs)
-            let resultsRendered = Some(results->Js_array2.mapi((dto,i) => stmtsDtoToResultRendered(dto,i,isStmtToShow)))
+            let resultsRendered = Some(
+                results->Js_array2.mapi((dto,i) => {
+                    stmtsDtoToResultRendered(~stmtsDto=dto, ~idx=i, ~isStmtToShow, ~getFrmLabelBkgColor)
+                })
+            )
             {
                 ...st,
                 tree,
@@ -467,6 +502,28 @@ let sortByFromStr = str => {
     }
 }
 
+let rndCheckboxWithLabelAndBorder = (
+    ~checked:bool,
+    ~onChange:bool=>unit,
+    ~label:string,
+) => {
+    <FormControlLabel
+        control={
+            <Checkbox
+                checked
+                onChange=evt2bool(onChange)
+            />
+        }
+        label
+        style=ReactDOM.Style.make(
+            ~border="solid 1px lightgrey", 
+            ~borderRadius="7px", 
+            ~paddingRight="10px",
+            ()
+        )
+    />
+}
+
 @react.component
 let make = (
     ~modalRef:modalRef,
@@ -474,7 +531,7 @@ let make = (
     ~settings:settings,
     ~preCtxVer: int,
     ~preCtx: mmContext,
-    ~frms: Belt_MapString.t<frmSubsData>,
+    ~frms: frms,
     ~parenCnt: parenCnt,
     ~varsText: string,
     ~disjText: string,
@@ -488,7 +545,8 @@ let make = (
     ~onCancel:unit=>unit
 ) => {
     let (state, setState) = React.useState(() => makeInitialState( 
-        ~rootUserStmts=rootStmts, ~frms, ~parenCnt, ~initialParams, ~initialDebugLevel
+        ~rootUserStmts=rootStmts, ~frms, ~parenCnt, ~initialParams, ~initialDebugLevel, 
+        ~allowedFrms=settings.allowedFrms
     ))
 
     let onlyOneResultIsAvailable = switch state.results {
@@ -520,10 +578,23 @@ let make = (
         setState(toggleAllowNewVars)
     }
 
+    let actToggleUseDisc = () => setState(toggleUseDisc)
+    let actToggleUseDepr = () => setState(toggleUseDepr)
+    let actToggleUseTranDepr = () => setState(toggleUseTranDepr)
+
     let makeActTerminate = (modalId:modalId):(unit=>unit) => {
         () => {
             MM_wrk_client.terminateWorker()
             closeModal(modalRef, modalId)
+        }
+    }
+
+    let getFrmLabelBkgColor = (label:string):option<string> => {
+        switch frms->frmsGetByLabel(label) {
+            | None => None
+            | Some(frm) => {
+                MM_react_common.getFrmLabelBkgColor(frm.frame, settings)
+            }
         }
     }
 
@@ -539,7 +610,13 @@ let make = (
             ~exprToProve=state.exprToProve,
             ~reservedLabels,
         )
-        setState(st => setResults(st, if (st.debugLevel > 0) {Some(treeDto)} else {None}, Some(results)))
+        setState(st => {
+            st->setResults(
+                ~tree = if (st.debugLevel > 0) {Some(treeDto)} else {None}, 
+                ~results=Some(results), 
+                ~getFrmLabelBkgColor
+            )
+        })
     }
 
     let actProve = () => {
@@ -583,6 +660,14 @@ let make = (
                                 state.maxNumberOfBranchesStr->Belt_Int.fromString
                             },
                     }),
+                    ~allowedFrms={
+                        inSyntax: settings.allowedFrms.inSyntax,
+                        inEssen: {
+                            useDisc:state.useDisc,
+                            useDepr:state.useDepr,
+                            useTranDepr:state.useTranDepr,
+                        }
+                    },
                     ~syntaxTypes=None,
                     ~exprsToSyntaxCheck=None,
                     ~debugLevel = st.debugLevel,
@@ -644,6 +729,7 @@ let make = (
                             <MM_cmp_proof_tree
                                 tree
                                 rootExpr=state.exprToProve
+                                settings
                                 wrkCtx
                                 rootStmts=state.rootStmts
                             />
@@ -665,15 +751,15 @@ let make = (
 
     let rndLengthRestrictSelector = (value:lengthRestrict) => {
         <FormControl size=#small>
-            <InputLabel id="length-restrict-select-label">"Length restriction"</InputLabel>
+            <InputLabel id="length-restrict-select-label">"Statement length restriction"</InputLabel>
             <Select
-                sx={"width": 130}
+                sx={"width": 190}
                 labelId="length-restrict-select-label"
                 value={lengthRestrictToStr(value)}
-                label="Length restriction"
+                label="Statement length restriction"
                 onChange=evt2str(str => actLengthRestrictUpdated(lengthRestrictFromStr(str)))
             >
-                <MenuItem value="No">{React.string("No")}</MenuItem>
+                <MenuItem value="No">{React.string("Unrestricted")}</MenuItem>
                 <MenuItem value="LessEq">{React.string("LessEq")}</MenuItem>
                 <MenuItem value="Less">{React.string("Less")}</MenuItem>
             </Select>
@@ -695,7 +781,7 @@ let make = (
                             label="Sort results by"
                             onChange=evt2str(str => actSortByChange(sortByFromStr(str)))
                         >
-                            <MenuItem value="UnprovedStmtsNum">{React.string("Number of unproved statements")}</MenuItem>
+                            <MenuItem value="UnprovedStmtsNum">{React.string("Number of unproved steps")}</MenuItem>
                             <MenuItem value="NumOfNewVars">{React.string("Number of new variables")}</MenuItem>
                             <MenuItem value="AsrtLabel">{React.string("Assertion label")}</MenuItem>
                         </Select>
@@ -734,6 +820,7 @@ let make = (
                 <Row>
                     <AutocompleteVirtualized value=state.label options=state.availableLabels size=#small width=200
                         onChange=actLabelUpdated
+                        label="Label of root justification"
                     />
                     <TextField 
                         label="Search depth"
@@ -742,6 +829,10 @@ let make = (
                         autoFocus=true
                         value=state.depthStr
                         onChange=evt2str(actDepthUpdated)
+                        onKeyDown=kbrdHnd2(
+                            kbrdClbkMake(~key=keyEnter, ~act=actProve, ()),
+                            kbrdClbkMake(~key=keyEsc, ~act=onCancel, ()),
+                        )
                     />
                     {rndLengthRestrictSelector(state.lengthRestrict)}
                 </Row>
@@ -770,7 +861,7 @@ let make = (
                                 onChange={_ => actToggleAllowNewStmts()}
                             />
                         }
-                        label="Allow new statements"
+                        label="Allow new steps"
                         style=ReactDOM.Style.make(
                             ~border="solid 1px lightgrey", 
                             ~borderRadius="7px", 
@@ -798,6 +889,42 @@ let make = (
                         )
                     />
                 </Row>
+                <table>
+                    <tbody>
+                        <tr>
+                            <td>
+                                {React.string("Allow usage of assertions:")}
+                            </td>
+                            <td style=ReactDOM.Style.make(~paddingLeft="10px", ())>
+                                {
+                                    rndCheckboxWithLabelAndBorder(
+                                        ~checked=state.useDisc,
+                                        ~onChange=_=>actToggleUseDisc(),
+                                        ~label="discouraged",
+                                    )
+                                }
+                            </td>
+                            <td>
+                                {
+                                    rndCheckboxWithLabelAndBorder(
+                                        ~checked=state.useDepr,
+                                        ~onChange=_=>actToggleUseDepr(),
+                                        ~label="deprecated",
+                                    )
+                                }
+                            </td>
+                            <td>
+                                {
+                                    rndCheckboxWithLabelAndBorder(
+                                        ~checked=state.useTranDepr,
+                                        ~onChange=_=>actToggleUseTranDepr(),
+                                        ~label="transitively deprecated",
+                                    )
+                                }
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
                 <Row>
                     {rndDebugParam()}
                     <TextField 
@@ -807,6 +934,10 @@ let make = (
                         style=ReactDOM.Style.make(~width="200px", ())
                         value=state.maxNumberOfBranchesStr
                         onChange=evt2str(actMaxNumberOfBranchesStrUpdated)
+                        onKeyDown=kbrdHnd2(
+                            kbrdClbkMake(~key=keyEnter, ~act=actProve, ()),
+                            kbrdClbkMake(~key=keyEsc, ~act=onCancel, ()),
+                        )
                     />
                 </Row>
                 <Row>
@@ -988,11 +1119,11 @@ let make = (
             React.null
         } else {
             <Row alignItems=#center>
-                {React.string("Root statements: ")}
+                {React.string("Allowed statements: ")}
                 {
                     rndRootStmtsForLevelShort(
                         ~title = "first level", 
-                        ~dialogTitle = "Select statements to derive from on level 0", 
+                        ~dialogTitle = "Select steps to derive from on level 0", 
                         ~getFlags = state => state.args0,
                         ~setFlags = newFlags => setState(updateArgs0(_, newFlags)),
                     )
@@ -1000,7 +1131,7 @@ let make = (
                 {
                     rndRootStmtsForLevelShort(
                         ~title = "other levels", 
-                        ~dialogTitle = "Select statements to derive from on other levels", 
+                        ~dialogTitle = "Select steps to derive from on other levels", 
                         ~getFlags = state => state.args1,
                         ~setFlags = newFlags => setState(updateArgs1(_, newFlags)),
                     )

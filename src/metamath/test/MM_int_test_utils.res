@@ -3,9 +3,10 @@ open MM_parser
 open MM_wrk_editor
 open MM_statements_dto
 open MM_progress_tracker
+open MM_editor_history
+open Common
 
 let setMmPath = "./src/metamath/test/resources/set-no-proofs._mm"
-let asrtsToSkipFilePath = "./src/metamath/test/resources/set-no-proofs-asrts-to-skip.txt"
 let failOnMismatch = true
 let debug = false
 
@@ -27,6 +28,13 @@ let proofStatusToStr = status => {
 }
 
 let editorStateToStr = st => {
+    let userStmtTypeToStr = stmt => {
+        switch stmt.typ {
+            | E => "e"
+            | P => if (stmt.isGoal) {"g"} else {"p"}
+        }
+    }
+
     let lines = []
     lines->Js_array2.push("Variables:")->ignore
     lines->Js_array2.push(st.varsText)->ignore
@@ -38,7 +46,7 @@ let editorStateToStr = st => {
         lines->Js_array2.push("")->ignore
         lines->Js_array2.push(
             "--- "
-            ++ (stmt.typ->userStmtTypeToStr)
+            ++ (stmt->userStmtTypeToStr)
             ++ " -------------------------------------------------------------------------------"
         )->ignore
         lines->Js_array2.push(stmt.label)->ignore
@@ -51,7 +59,7 @@ let editorStateToStr = st => {
         )->ignore
         switch stmt.stmtErr {
             | None => ()
-            | Some(msg) => lines->Js_array2.push("Stmt Error: " ++ msg)->ignore
+            | Some({msg}) => lines->Js_array2.push("Stmt Error: " ++ msg)->ignore
         }
         switch stmt.syntaxErr {
             | None => ()
@@ -90,7 +98,7 @@ let newStmtsDtoToStr = (newStmtsDto:stmtsDto):string => {
     disjStr ++ "\n" ++ stmtsStr
 }
 
-let readEditorStateToString = (fileName:string):string => {
+let readTestFileToString = (fileName:string):string => {
     Expln_utils_files.readStringFromFile(curTestDataDir.contents ++ "/" ++ fileName ++ ".txt")
         ->Js.String2.replaceByRe(%re("/\r/g"), "")
 }
@@ -114,7 +122,7 @@ let assertStrEqFile = (actualStr:string, expectedStrFileName:string) => {
     }
     if (actualStr != expectedResultStr) {
         let fileWithActualResult = fileWithExpectedResult ++ ".actual"
-        Expln_utils_files.writeStringToFile(fileWithActualResult, actualStr)
+        Expln_utils_files.writeStringToFile(actualStr, fileWithActualResult)
         if (failOnMismatch) {
             assertEq( fileWithActualResult, fileWithExpectedResult )
         }
@@ -124,9 +132,14 @@ let assertStrEqFile = (actualStr:string, expectedStrFileName:string) => {
 let assertNoErrors = (st) => {
     if (st->editorStateHasErrors) {
         let filePath = curTestDataDir.contents ++ "/" ++ "editor-state-error.txt"
-        Expln_utils_files.writeStringToFile( filePath, st->editorStateToStr )
+        Expln_utils_files.writeStringToFile( st->editorStateToStr, filePath )
         raise(MmException({msg:`Editor state has errors: ${filePath}`}))
     }
+}
+
+let assertEditorHistory = (ht:editorHistory, expectedStrFileName:string) => {
+    let actualStr = ht->editorHistToStringExtended
+    assertStrEqFile(actualStr, expectedStrFileName)
 }
 
 let assertEditorState = (st, expectedStrFileName:string) => {
@@ -150,12 +163,12 @@ let assertProof = (st, stmtId:string, expectedStrFileName:string) => {
 let assertTextsEq = (text1:string, fileName1:string, text2:string, fileName2:string):unit => {
     if (text1 != text2) {
         Expln_utils_files.writeStringToFile(
-            curTestDataDir.contents ++ "/" ++ fileName1 ++ ".txt", 
-            text1
+            text1,
+            curTestDataDir.contents ++ "/" ++ fileName1 ++ ".txt"
         )
         Expln_utils_files.writeStringToFile(
-            curTestDataDir.contents ++ "/" ++ fileName2 ++ ".txt", 
-            text2
+            text2,
+            curTestDataDir.contents ++ "/" ++ fileName2 ++ ".txt"
         )
         assertEq( text1, text2 )
     }
@@ -163,6 +176,14 @@ let assertTextsEq = (text1:string, fileName1:string, text2:string, fileName2:str
 
 let assertTextEqFile = (actualStr:string, expectedStrFileName:string):unit => {
     assertStrEqFile(actualStr, expectedStrFileName)
+}
+
+let assertFileContentsEq = (fileName1:string, fileName2:string):unit => {
+    let text1 = readTestFileToString(fileName1)
+    let text2 = readTestFileToString(fileName2)
+    if (text1 != text2) {
+        failMsg(`${fileName1} != ${fileName2}`)
+    }
 }
 
 let generateReducedMmFile = (
@@ -175,7 +196,7 @@ let generateReducedMmFile = (
     let fullMmFileText = Expln_utils_files.readStringFromFile(pathToFullMmFile)
     let (ast, _) = parseMmFile(~mmFileContent=fullMmFileText, ~skipComments, ~skipProofs, ())
     let reducedContent = astToStr(ast)
-    Expln_utils_files.writeStringToFile( pathToSaveTo, reducedContent )
+    Expln_utils_files.writeStringToFile( reducedContent, pathToSaveTo )
 }
 
 let countFrames = (
@@ -218,7 +239,7 @@ let testProgressTrackerMake = (
         ~step, 
         ~maxCnt,
         ~onProgress = pct => {
-            Js.Console.log2(Js.Date.make()->Js.Date.toISOString, (pct *. 100.)->Js_math.round->Belt_Float.toString ++ "%")
+            Js.Console.log2(Js.Date.make()->Js.Date.toISOString, pct->floatToPctStr)
         }, 
         ()
     )

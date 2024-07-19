@@ -1,6 +1,18 @@
 let nbsp = Js_string2.fromCharCode(160)
+let circleChar = Js_string2.fromCharCode(9679)
 
 let currTimeStr = () => Js.Date.now()->Js.Date.fromFloat->Js.Date.toISOString
+let compareDates = (a:Js_date.t, b:Js_date.t):int => {
+    let t1 = a->Js_date.getTime
+    let t2 = b->Js_date.getTime
+    if (t1 < t2) {
+        -1
+    } else if (t2 < t1) {
+        1
+    } else {
+        0
+    }
+}
 
 let floatToPctStr = pct => (pct  *. 100.)->Js.Math.round->Belt.Float.toInt->Belt_Int.toString ++ "%"
 
@@ -40,6 +52,19 @@ let cacheGet = (cache, depVer, dep) => {
     }
 }
 
+let strToRegex = (str:string):result<Js_re.t,string> => {
+    try {
+        Ok(Js_re.fromString(str))
+    } catch {
+        | exn => {
+            Error(
+                exn->Js_exn.asJsExn->Belt_Option.flatMap(Js_exn.message)
+                    ->Belt.Option.getWithDefault(`could not create a regular expression from string '${str}'`)
+            )
+        }
+    }
+}
+
 let splitByRegex = (str,regex) => {
     str
         ->Js_string2.splitByRe(regex)
@@ -73,6 +98,69 @@ let safeBase64ToStr = safeBase64 => {
         ->base64ToStr
 }
 
-type timeoutID
+type timeoutID = int
 @val external setTimeout: (unit => unit, int) => timeoutID = "setTimeout"
 @val external clearTimeout: (timeoutID) => unit = "clearTimeout"
+let stubTimeoutId: timeoutID = 0
+
+type version<'a> = {
+    ver:int,
+    val:'a
+}
+
+let versionMake = (val:'a):version<'a> => {
+    {
+        ver:0,
+        val
+    }
+}
+
+let versionSet = (version:version<'a>, newVal:'a):version<'a> => {
+    {
+        ver:version.ver+1,
+        val:newVal
+    }
+}
+
+type arrayQueue<'a> = {
+    mutable begin:int,
+    mutable end:int,
+    mutable maxEnd:int,
+    mutable data: array<'a>,
+}
+
+let arrayQueueMake = (initSize:int):arrayQueue<'a> => {
+    let data = Expln_utils_common.createArray(initSize)
+    {
+        begin:0,
+        end:-1,
+        maxEnd: data->Js.Array2.length-1,
+        data,
+    }
+}
+
+let arrayQueueAdd = (q:arrayQueue<'a>, elem:'a):unit => {
+    if (q.end == q.maxEnd) {
+        Js.Console.log(`q.end == q.maxEnd`)
+        q.data = Belt_Array.concat(q.data, Expln_utils_common.createArray(q.data->Js_array2.length))
+        q.maxEnd = q.data->Js.Array2.length-1
+    }
+    q.end = q.end + 1
+    q.data[q.end] = elem
+}
+
+let arrayQueuePop = (q:arrayQueue<'a>):option<'a> => {
+    if (q.begin <= q.end) {
+        let res = q.data[q.begin]
+        q.begin = q.begin + 1
+        Some(res)
+    } else {
+        None
+    }
+    
+}
+
+let arrayQueueReset = (q:arrayQueue<'a>):unit => {
+    q.begin = 0
+    q.end = -1
+}

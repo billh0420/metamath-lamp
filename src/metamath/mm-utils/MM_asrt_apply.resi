@@ -6,8 +6,7 @@ open MM_unification_debug
 type applyAssertionResult = {
     newVars: array<int>,
     newVarTypes: array<int>,
-    newDisj:disjMutable,
-    asrtLabel: string,
+    frame: frame,
     subs: subs,
     err:option<unifErr>,
 }
@@ -25,7 +24,7 @@ module ApplyAssertionResultHash: {
 
 let applyAssertions: (
     ~maxVar:int,
-    ~frms:Belt_MapString.t<frmSubsData>,
+    ~frms:array<frmSubsData>,
     ~isDisjInCtx:(int,int)=>bool,
     ~statements:array<expr>,
     ~exactOrderOfStmts:bool=?,
@@ -52,3 +51,5 @@ let iterateCombinations: (
     ~combinationConsumer:array<int>=>contunieInstruction,
     ~errConsumer:unifErr=>contunieInstruction,
 ) => contunieInstruction
+
+let getNextHypIdxToMatch: (int, array<int>) => int

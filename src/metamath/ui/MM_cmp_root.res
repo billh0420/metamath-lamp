@@ -1,48 +1,42 @@
 open Expln_React_Mui
 open MM_context
 open MM_cmp_settings
-open MM_wrk_editor
 open MM_wrk_settings
 open Expln_React_Modal
 open Common
+open MM_wrk_pre_ctx_data
+open MM_react_common
 
 type tabData =
     | Settings
     | Editor
     | ExplorerIndex
-    | ExplorerAsrt({label:string})
+    | ExplorerFrame({label:string})
 
 type state = {
-    settings: settings,
-    settingsV: int,
-    srcs: array<mmCtxSrcDto>,
-    ctx: mmContext,
-    ctxV: int,
+    preCtxData:preCtxData,
+    ctxSelectorIsExpanded:bool,
 }
 
 let createInitialState = (~settings) => {
-    settings,
-    settingsV: 0,
-    srcs: [],
-    ctx: createContext(()),
-    ctxV: 0,
+    preCtxData: preCtxDataMake(~settings),
+    ctxSelectorIsExpanded:true,
 }
 
-let setCtx = (st,srcs,ctx) => {
+let updatePreCtxData = (
+    st:state,
+    ~settings:option<settings>=?,
+    ~ctx:option<(array<mmCtxSrcDto>,mmContext)>=?,
+    ()
+): state => {
     {
         ...st,
-        srcs,
-        ctx,
-        ctxV: st.ctxV + 1,
+        preCtxData: st.preCtxData->preCtxDataUpdate( ~settings?, ~ctx?, () )
     }
 }
 
-let setSettings = (st,settings) => {
-    {
-        ...st,
-        settings,
-        settingsV: st.settingsV + 1
-    }
+let updateCtxSelectorIsExpanded = (st:state,ctxSelectorIsExpanded:bool):state => {
+    {...st, ctxSelectorIsExpanded}
 }
 
 @get external getClientHeight: Dom.element => int = "clientHeight"
@@ -51,8 +45,20 @@ let setSettings = (st,settings) => {
 let mainTheme = ThemeProvider.createTheme(
     {
         "palette": {
+            "white": {
+                "main": "#ffffff",
+            },
             "grey": {
                 "main": "#e0e0e0",
+            },
+            "red": {
+                "main": "#FF0000",
+            },
+            "pastelred": {
+                "main": "#FAA0A0",
+            },
+            "orange": {
+                "main": "#FF7900",
             }
         }
     }
@@ -60,8 +66,10 @@ let mainTheme = ThemeProvider.createTheme(
 
 @new external parseUrlQuery: string => {..} = "URLSearchParams"
 @val external window: {..} = "window"
+@val external document: {..} = "document"
 
 let location = window["location"]
+let tempMode = ref(false)
 let editorInitialStateJsonStr = switch parseUrlQuery(location["search"])["get"](. "editorState")->Js.Nullable.toOption {
     | Some(initialStateSafeBase64) => {
         window["history"]["replaceState"](. 
@@ -69,9 +77,14 @@ let editorInitialStateJsonStr = switch parseUrlQuery(location["search"])["get"](
             "", 
             location["origin"] ++ location["pathname"]
         )->ignore
+        tempMode := true
         Some(initialStateSafeBase64->safeBase64ToStr)
     }
     | None => Local_storage_utils.locStorReadString(MM_cmp_editor.editorStateLocStorKey)
+}
+
+if (tempMode.contents) {
+    document["title"] = "TEMP " ++ document["title"]
 }
 
 @react.component
@@ -80,31 +93,111 @@ let make = () => {
     @warning("-27")
     let {tabs, addTab, openTab, removeTab, renderTabs, updateTabs, activeTabId} = Expln_React_UseTabs.useTabs()
     let (state, setState) = React.useState(_ => createInitialState(~settings=settingsReadFromLocStor()))
+    let (showTabs, setShowTabs) = React.useState(() => true)
 
-    let reloadCtx = React.useRef(Js.Nullable.null)
+    let reloadCtx: React.ref<Js.Nullable.t<MM_cmp_context_selector.reloadCtxFunc>> = React.useRef(Js.Nullable.null)
+    let toggleCtxSelector = React.useRef(Js.Nullable.null)
+    let loadEditorState = React.useRef(Js.Nullable.null)
 
-    let actCtxUpdated = (srcs:array<mmCtxSrcDto>, newCtx:mmContext, settingsOpt) => {
-        let settings = switch settingsOpt {
-            | Some(settings) => settings
-            | None => state.settings
+    let isFrameExplorerTab = (tabData:tabData, ~label:option<string>=?, ()):bool => {
+        switch tabData {
+            | ExplorerFrame({label:lbl}) => label->Belt_Option.mapWithDefault(true, label => lbl == label)
+            | _ => false
         }
-        newCtx->moveConstsToBegin(settings.parens)
-        setState(setCtx(_,srcs,newCtx))
     }
 
-    let actSettingsUpdated = newSettings => {
-        setState(setSettings(_,newSettings))
+    let isEditorTab = (tabData:tabData):bool => {
+        switch tabData {
+            | Editor => true
+            | _ => false
+        }
+    }
+
+    let actCloseFrmTabs = () => {
+        tabs->Js.Array2.forEach(tab => {
+            if (isFrameExplorerTab(tab.data, ())) {
+                removeTab(tab.id)
+            }
+        })
+    }
+
+    let actCtxUpdated = (srcs:array<mmCtxSrcDto>, newCtx:mmContext) => {
+        actCloseFrmTabs()
+        setState(updatePreCtxData(_,~ctx=(srcs,newCtx), ()))
+    }
+
+    let actSettingsUpdated = (newSettings:settings) => {
+        actCloseFrmTabs()
         settingsSaveToLocStor(newSettings)
-        actCtxUpdated(state.srcs, state.ctx, Some(newSettings))
+        setState(updatePreCtxData(_,~settings=newSettings, ()))
+        if (
+            state.preCtxData.settingsV.val.descrRegexToDisc != newSettings.descrRegexToDisc
+            || state.preCtxData.settingsV.val.labelRegexToDisc != newSettings.labelRegexToDisc
+            || state.preCtxData.settingsV.val.descrRegexToDepr != newSettings.descrRegexToDepr
+            || state.preCtxData.settingsV.val.labelRegexToDepr != newSettings.labelRegexToDepr
+        ) {
+            reloadCtx.current->Js.Nullable.toOption->Belt.Option.forEach(reloadCtx => {
+                reloadCtx(
+                    ~srcs=state.preCtxData.srcs, 
+                    ~settings=newSettings, 
+                    ~force=true, 
+                    ~showError=true, 
+                    ()
+                )->ignore
+            })
+        }
+    }
+
+    let actCtxSelectorExpandedChange = (expanded) => {
+        setState(updateCtxSelectorIsExpanded(_,expanded))
+    }
+
+    let openFrameExplorer = (label:string):unit => {
+        setState(st => {
+            switch st.preCtxData.ctxV.val->getFrame(label) {
+                | None => {
+                    openInfoDialog( ~modalRef, ~text=`Cannot find an assertion by label '${label}'`, () )
+                }
+                | Some(_) => {
+                    updateTabs(tabsSt => {
+                        let tabsSt = switch tabsSt->Expln_React_UseTabs.getTabs
+                                                ->Js.Array2.find(tab => isFrameExplorerTab(tab.data, ~label, ())) {
+                            | Some(tab) => tabsSt->Expln_React_UseTabs.openTab(tab.id)
+                            | None => {
+                                let (tabsSt, tabId) = tabsSt->Expln_React_UseTabs.addTab( 
+                                    ~label, ~closable=true, ~data=ExplorerFrame({label:label}), ~doOpen=true, ()
+                                )
+                                let tabsSt = tabsSt->Expln_React_UseTabs.openTab(tabId)
+                                tabsSt
+                            }
+                        }
+                        tabsSt
+                    })
+                }
+            }
+            st
+        })
+    }
+
+    let focusEditorTab = ():unit => {
+        updateTabs(tabsSt => {
+            switch tabsSt->Expln_React_UseTabs.getTabs->Js.Array2.find(tab => isEditorTab(tab.data)) {
+                | Some(tab) => tabsSt->Expln_React_UseTabs.openTab(tab.id)
+                | None => tabsSt
+            }
+        })
     }
 
     React.useEffect0(()=>{
         updateTabs(st => {
             if (st->Expln_React_UseTabs.getTabs->Js_array2.length == 0) {
-                let (st, _) = st->Expln_React_UseTabs.addTab(~label="Settings", ~closable=false, ~data=Settings)
-                let (st, editorTabId) = st->Expln_React_UseTabs.addTab(~label="Editor", ~closable=false, ~data=Editor)
-                // let (st, _) = st->Expln_React_UseTabs.addTab(~label="Explorer", ~closable=false, ~data=ExplorerIndex)
-                let st = st->Expln_React_UseTabs.openTab(editorTabId)
+                let (st, _) = st->Expln_React_UseTabs.addTab(~label="Settings", ~closable=false, ~data=Settings, ())
+                let (st, _) = st->Expln_React_UseTabs.addTab(
+                    ~label="Editor", ~closable=false, ~data=Editor, ~doOpen=true, 
+                    ~color=?(if (tempMode.contents) {Some("orange")} else {None}), 
+                    ()
+                )
+                let (st, _) = st->Expln_React_UseTabs.addTab(~label="Explorer", ~closable=false, ~data=ExplorerIndex, ())
                 st
             } else {
                 st
@@ -120,31 +213,44 @@ let make = () => {
                     | Settings => 
                         <MM_cmp_settings 
                             modalRef
-                            ctx=state.ctx 
-                            settingsVer=state.settingsV
-                            settings=state.settings
+                            preCtxData=state.preCtxData
                             onChange=actSettingsUpdated
                         />
                     | Editor => 
                         <MM_cmp_editor
                             top
                             modalRef
-                            settings=state.settings
-                            settingsV=state.settingsV
-                            srcs=state.srcs
-                            preCtxV=state.ctxV
-                            preCtx=state.ctx
+                            preCtxData=state.preCtxData
                             reloadCtx
+                            loadEditorState
                             initialStateJsonStr=editorInitialStateJsonStr
+                            tempMode=tempMode.contents
+                            toggleCtxSelector
+                            ctxSelectorIsExpanded=state.ctxSelectorIsExpanded
+                            showTabs
+                            setShowTabs={b=>setShowTabs(_ => b)}
+                            openFrameExplorer
                         />
                     | ExplorerIndex => 
                         <MM_cmp_pe_index
-                            settingsVer=state.settingsV
-                            settings=state.settings
-                            preCtxVer=state.ctxV
-                            preCtx=state.ctx
+                            modalRef
+                            preCtxData=state.preCtxData
+                            openFrameExplorer
+                            toggleCtxSelector
+                            ctxSelectorIsExpanded=state.ctxSelectorIsExpanded
                         />
-                    | ExplorerAsrt({label}) => <MM_cmp_click_counter title=label />
+                    | ExplorerFrame({label}) => 
+                        <MM_cmp_pe_frame_full
+                            top
+                            modalRef
+                            preCtxData=state.preCtxData
+                            label
+                            openFrameExplorer
+                            loadEditorState
+                            focusEditorTab
+                            toggleCtxSelector
+                            ctxSelectorIsExpanded=state.ctxSelectorIsExpanded
+                        />
                 }
             }
         </div>
@@ -157,14 +263,30 @@ let make = () => {
                 <Col>
                     <MM_cmp_context_selector 
                         modalRef 
-                        webSrcSettings={state.settings.webSrcSettings}
-                        onUrlBecomesTrusted={url=>{
-                            state.settings->markUrlAsTrusted(url)->actSettingsUpdated
-                        }}
-                        onChange={(srcs,ctx)=>actCtxUpdated(srcs, ctx, None)}
+                        settings={state.preCtxData.settingsV.val}
+                        onUrlBecomesTrusted={
+                            url => state.preCtxData.settingsV.val->markUrlAsTrusted(url)->actSettingsUpdated
+                        }
+                        onChange={(srcs,ctx)=>actCtxUpdated(srcs, ctx)}
                         reloadCtx
+                        style=ReactDOM.Style.make(
+                            ~display=
+                                ?if(state.preCtxData.settingsV.val.hideContextSelector 
+                                        && !state.ctxSelectorIsExpanded) {
+                                    Some("none")
+                                } else {None}, 
+                            ()
+                        )
+                        onExpandedChange=actCtxSelectorExpandedChange
+                        doToggle=toggleCtxSelector
                     />
-                    {renderTabs()}
+                    {
+                        if (showTabs) {
+                            renderTabs()
+                        } else {
+                            <div style=ReactDOM.Style.make(~display="none", ()) />
+                        }
+                    }
                 </Col>
             }
             content={contentTop => {

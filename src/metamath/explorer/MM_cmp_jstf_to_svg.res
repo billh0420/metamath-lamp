@@ -1,5 +1,6 @@
 open Expln_2D.Svg2D
 open Expln_React_common
+open MM_react_common
 
 type svgComp = vector => (reElem,boundaries)
 
@@ -71,6 +72,7 @@ let text = (
     ~key:option<string>=?,
     ~color:string="black",
     ~bold:bool=false,
+    ~onClick:option<ReactEvent.Mouse.t=>unit>=?,
     ()
 ):(reElem,boundaries) => {
     let ey = ex->vecRot(90.->deg)
@@ -90,7 +92,12 @@ let text = (
             fontSize={fontSize->Belt_Float.toString}
             fontFamily="courier"
             fontWeight={if (bold) {"bold"} else {"normal"}}
-            style=ReactDOM.Style.make(~whiteSpace="pre", ())
+            style=ReactDOM.Style.make(
+                ~whiteSpace="pre", 
+                ~cursor=if (onClick->Belt_Option.isSome) {"pointer"} else {"default"}, 
+                ()
+            )
+            ?onClick
         >
             {text->React.string}
         </text>,
@@ -205,6 +212,7 @@ let rndStmtAndHyp = (
     ~ctxFirst:bool,
     ~frmStmt:array<string>,
     ~hypLabel:option<string>,
+    ~onLabelClick:option<ReactEvent.Mouse.t=>unit>,
     ~subs:Belt_HashMapString.t<array<string>>,
     ~subsColors:Belt_HashMapString.t<string>,
     ~frmColors:option<Belt_HashMapString.t<string>>,
@@ -227,6 +235,7 @@ let rndStmtAndHyp = (
             }
         }
 
+        let rndCtxStmt = ctxFirst || frmStmt->Js.Array2.some(subs->Belt_HashMapString.has)
         let (_, bndSample) = text(~ex, ~text=".", ())
         let charHeight = bndSample->bndHeight
         let charWidth = bndSample->bndWidth
@@ -244,7 +253,7 @@ let rndStmtAndHyp = (
         } else {
             (
                 ref(exL),
-                ref(exS->vecTr(ey->vecMul(charHeight *. 3.3)))
+                ref( if (rndCtxStmt) {exS->vecTr(ey->vecMul(charHeight *. 3.3))} else {exL} )
             )
         }
         let frmElems = []
@@ -262,28 +271,30 @@ let rndStmtAndHyp = (
             bnds->Js_array2.push(frmBnd)->ignore
             frmEx := frmEx.contents->vecTr(ex->vecMul(frmBnd->bndWidth))
 
-            let (cElems,ctxBnd,ctxContentOnlyBnd) = rndStmt(
-                ~ex=ctxEx.contents,
-                ~stmt=getCtxSubStmt(frmSym),
-                ~symToColor=ctxSymToColor,
-                ~key="ctx-" ++ i->Belt_Int.toString,
-            )
-            ctxElems->Js_array2.pushMany(cElems)->ignore
-            bnds->Js_array2.push(ctxBnd)->ignore
-            ctxEx := ctxEx.contents->vecTr(ex->vecMul(ctxBnd->bndWidth))
+            if (rndCtxStmt) {
+                let (cElems,ctxBnd,ctxContentOnlyBnd) = rndStmt(
+                    ~ex=ctxEx.contents,
+                    ~stmt=getCtxSubStmt(frmSym),
+                    ~symToColor=ctxSymToColor,
+                    ~key="ctx-" ++ i->Belt_Int.toString,
+                )
+                ctxElems->Js_array2.pushMany(cElems)->ignore
+                bnds->Js_array2.push(ctxBnd)->ignore
+                ctxEx := ctxEx.contents->vecTr(ex->vecMul(ctxBnd->bndWidth))
 
-            switch subsColors->Belt_HashMapString.get(frmSym) {
-                | None => ()
-                | Some(color) => {
-                    let (conElem,conBnd) = rndConnection(
-                        ~bnd1=frmContentOnlyBnd, 
-                        ~bnd2=ctxContentOnlyBnd, 
-                        ~color, 
-                        ~key=i->Belt_Int.toString,
-                        ~noFrameForBottomBnd,
-                    )
-                    conElems->Js_array2.push(conElem)->ignore
-                    bnds->Js_array2.push(conBnd)->ignore
+                switch subsColors->Belt_HashMapString.get(frmSym) {
+                    | None => ()
+                    | Some(color) => {
+                        let (conElem,conBnd) = rndConnection(
+                            ~bnd1=frmContentOnlyBnd, 
+                            ~bnd2=ctxContentOnlyBnd, 
+                            ~color, 
+                            ~key=i->Belt_Int.toString,
+                            ~noFrameForBottomBnd,
+                        )
+                        conElems->Js_array2.push(conElem)->ignore
+                        bnds->Js_array2.push(conBnd)->ignore
+                    }
                 }
             }
         })
@@ -298,6 +309,7 @@ let rndStmtAndHyp = (
                     ~bold=false,
                     ~key="label",
                     ~text=hypLabel,
+                    ~onClick=?onLabelClick,
                     ()
                 )
                 bnds->Js_array2.push(labelBnd)->ignore
@@ -317,6 +329,7 @@ let make = (
     ~frmColors:option<Belt_HashMapString.t<string>>,
     ~ctxColors1:option<Belt_HashMapString.t<string>>,
     ~ctxColors2:option<Belt_HashMapString.t<string>>,
+    ~onLabelClick:option<(int,string)=>unit>=?,
 ) => {
     let (_, bndSample) = text(~ex, ~text=".", ())
     let charHeight = bndSample->bndHeight
@@ -337,6 +350,7 @@ let make = (
             let (elem, bnd) = rndStmtAndHyp( 
                 ~ctxFirst=true, ~frmStmt=hyp, ~subs, ~subsColors, ~frmColors, ~ctxColors1, ~ctxColors2, 
                 ~hypLabel=Some(hypLabels[i]), ~noFrameForBottomBnd=true,
+                ~onLabelClick=onLabelClick->Belt_Option.map(onLabelClick => clickHnd(~act=()=>onLabelClick(i,hypLabels[i]), ()) ),
             )(curEx.contents)
             hypElems->Js.Array2.push(elem)->ignore
             hypBnds->Js.Array2.push(bnd)->ignore
@@ -344,7 +358,7 @@ let make = (
         })
         let asrtComp = rndStmtAndHyp( 
             ~ctxFirst=false, ~frmStmt=asrt, ~subs, ~subsColors, ~frmColors, ~ctxColors1, ~ctxColors2, 
-            ~hypLabel=None, ~noFrameForBottomBnd=false,
+            ~hypLabel=None, ~noFrameForBottomBnd=false, ~onLabelClick=None,
         )
         let (_, asrtSampleBnd) = asrtComp(ex)
         let (hypsElem, hypsBnd) = if (hyps->Js.Array2.length == 0) {

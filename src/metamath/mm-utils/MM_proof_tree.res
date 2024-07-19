@@ -18,19 +18,19 @@ type proofNodeDbg = {
 
 type proofTreeDbg = {
     newVars: array<string>,
-    disj: array<string>,
     exprToStr: expr=>string,
 }
 
 type rec proofNode = {
-    expr:expr,
+    id: int,
+    expr: expr,
     mutable fParents: option<array<exprSrc>>,
     mutable eParents: array<exprSrc>,
     mutable children: array<proofNode>,
     mutable proof: option<exprSrc>,
     mutable isInvalidFloating: bool,
     mutable dist: option<int>,
-    dbg: option<proofNodeDbg>,
+    pnDbg: option<proofNodeDbg>,
 }
 
 and exprSrc =
@@ -40,18 +40,19 @@ and exprSrc =
     | AssertionWithErr({args:array<proofNode>, frame:frame, err:unifErr})
 
 and proofTree = {
-    frms: Belt_MapString.t<frmSubsData>,
+    frms: Belt_HashMapInt.t<array<frmSubsData>>,
     hypsByExpr: Belt_HashMap.t<expr,hypothesis,ExprHash.identity>,
     hypsByLabel: Belt_HashMapString.t<hypothesis>,
     ctxMaxVar:int,
+    ctxDisj: disjMutable,
     mutable maxVar:int,
     newVars: Belt_HashSet.t<expr,ExprHash.identity>,
-    disj: disjMutable,
     parenCnt:parenCnt,
+    mutable nextNodeId: int,
     nodes: Belt_HashMap.t<expr,proofNode,ExprHash.identity>,
     rootStmts:array<rootStmt>,
     syntaxProofs: Belt_HashMap.t<expr,proofNode,ExprHash.identity>,
-    dbg: option<proofTreeDbg>,
+    ptDbg: option<proofTreeDbg>,
 }
 
 let exprSrcEq = (a:exprSrc,b:exprSrc):bool => {
@@ -73,7 +74,7 @@ let exprSrcEq = (a:exprSrc,b:exprSrc):bool => {
                 | Assertion({ args:bArgs, frame:bFrame, }) => {
                     aFrame.label == bFrame.label
                     && aArgs->Js.Array2.length == bArgs->Js.Array2.length
-                    && aArgs->Js.Array2.everyi((aArg,idx) => exprEq(aArg.expr, bArgs[idx].expr))
+                    && aArgs->Js.Array2.everyi((aArg,idx) => aArg.id == bArgs[idx].id)
                 }
                 | _ => false
             }
@@ -90,6 +91,7 @@ let exprSrcIsProved = (exprSrc:exprSrc): bool => {
     }
 }
 
+let pnGetId = node => node.id
 let pnGetExpr = node => node.expr
 let pnGetProof = node => node.proof
 let pnGetFParents = node => node.fParents
@@ -98,11 +100,12 @@ let pnIsInvalidFloating = node => node.isInvalidFloating
 let pnSetInvalidFloating = node => node.isInvalidFloating = true
 let pnGetDist = node => node.dist
 let pnSetDist = (node,dist) => node.dist = Some(dist)
-let pnGetDbg = node => node.dbg
+let pnGetDbg = node => node.pnDbg
 
-let ptGetFrms = tree => tree.frms
+let emptyFrmArr = []
+let ptGetFrms = (tree,typ) => tree.frms->Belt_HashMapInt.get(typ)->Belt.Option.getWithDefault(emptyFrmArr)
 let ptGetParenCnt = tree => tree.parenCnt
-let ptIsDisj = (tree:proofTree, n, m) => tree.disj->disjContains(n,m)
+let ptIsDisjInCtx = (tree:proofTree, n, m) => tree.ctxDisj->disjContains(n,m)
 let ptIsNewVarDef = (tree:proofTree, expr) => tree.newVars->Belt_HashSet.has(expr)
 let ptGetHypByExpr = ( tree:proofTree, expr:expr ):option<hypothesis> => tree.hypsByExpr->Belt_HashMap.get(expr)
 let ptGetHypByLabel = ( tree:proofTree, label:string ):option<hypothesis> => 
@@ -110,21 +113,21 @@ let ptGetHypByLabel = ( tree:proofTree, label:string ):option<hypothesis> =>
 let ptGetMaxVar = tree => tree.maxVar
 let ptGetCtxMaxVar = tree => tree.ctxMaxVar
 let ptGetRootStmts = tree => tree.rootStmts
-let ptGetDbg = (tree:proofTree) => tree.dbg
+let ptGetDbg = (tree:proofTree) => tree.ptDbg
 let ptGetCopyOfNewVars = tree => tree.newVars->Belt_HashSet.toArray
-let ptGetDisj = tree => tree.disj
+let ptGetCtxDisj = tree => tree.ctxDisj
 
 let ptMake = (
-    ~frms: Belt_MapString.t<frmSubsData>,
+    ~frms: frms,
     ~hyps: Belt_MapString.t<hypothesis>,
     ~ctxMaxVar: int,
-    ~disj: disjMutable,
+    ~ctxDisj: disjMutable,
     ~parenCnt: parenCnt,
     ~exprToStr: option<expr=>string>,
 ) => {
     let hypsArr = hyps->Belt_MapString.toArray
     {
-        frms,
+        frms: frms->frmsGetAllTypes->Js_array2.map(typ => (typ, frms->frmsSelect(~typ, ())))->Belt_HashMapInt.fromArray,
         hypsByLabel: hypsArr->Belt_HashMapString.fromArray,
         hypsByExpr: hypsArr
                     ->Js_array2.map(((_,hyp)) => (hyp.expr, hyp))
@@ -132,15 +135,15 @@ let ptMake = (
         ctxMaxVar,
         maxVar:ctxMaxVar,
         newVars: Belt_HashSet.make(~id=module(ExprHash), ~hintSize=16),
-        disj,
+        ctxDisj,
         parenCnt,
-        nodes: Belt_HashMap.make(~id=module(ExprHash), ~hintSize=16),
+        nextNodeId: 0,
+        nodes: Belt_HashMap.make(~id=module(ExprHash), ~hintSize=128),
         rootStmts: [],
-        syntaxProofs: Belt_HashMap.make(~id=module(ExprHash), ~hintSize=16),
-        dbg: exprToStr->Belt_Option.map(exprToStr => {
+        syntaxProofs: Belt_HashMap.make(~id=module(ExprHash), ~hintSize=128),
+        ptDbg: exprToStr->Belt_Option.map(exprToStr => {
             {
                 newVars: [],
-                disj: [],
                 exprToStr,
             }
         })
@@ -148,7 +151,7 @@ let ptMake = (
 }
 
 let pnGetExprStr = (node:proofNode):string => {
-    switch node.dbg {
+    switch node.pnDbg {
         | Some({exprStr}) => exprStr
         | None => node.expr->Js_array2.map(Belt_Int.toString)->Js.Array2.joinWith(" ")
     }
@@ -159,6 +162,7 @@ let ptGetNode = ( tree:proofTree, expr:expr):proofNode => {
         | Some(node) => node
         | None => {
             let node = {
+                id: tree.nextNodeId,
                 expr,
                 fParents: None,
                 eParents: [],
@@ -166,13 +170,14 @@ let ptGetNode = ( tree:proofTree, expr:expr):proofNode => {
                 children: [],
                 isInvalidFloating: false,
                 dist: None,
-                dbg: tree.dbg->Belt_Option.map(dbg => {
+                pnDbg: tree.ptDbg->Belt_Option.map(dbg => {
                     {
                         exprStr: dbg.exprToStr(expr),
                     }
                 })
             }
             tree.nodes->Belt_HashMap.set(expr, node)->ignore
+            tree.nextNodeId = tree.nextNodeId + 1
             node
         }
     }
@@ -238,16 +243,16 @@ let pnMarkProved = ( node:proofNode ):unit => {
 }
 
 let pnAddChild = (node, child): unit => {
-    if (!exprEq(node.expr, child.expr)) {
-        switch node.children->Js.Array2.find(existingChild => exprEq(existingChild.expr,child.expr)) {
+    if (node.id != child.id) {
+        switch node.children->Js.Array2.find(existingChild => existingChild.id  == child.id) {
             | None => node.children->Js_array2.push(child)->ignore
             | Some(_) => ()
         }
     }
 }
 
-let pnAddParent = (node:proofNode, parent:exprSrc, isEssential:bool):unit => {
-    if (node.proof->Belt.Option.isNone) {
+let pnAddParent = (node:proofNode, parent:exprSrc, isEssential:bool, forceAdd:bool):unit => {
+    if (node.proof->Belt.Option.isNone || forceAdd) {
         let newParentWasAdded = ref(false)
         let parents = if (isEssential) {
             node.eParents
@@ -284,6 +289,9 @@ let pnAddParent = (node:proofNode, parent:exprSrc, isEssential:bool):unit => {
             }
             if (exprSrcIsProved(parent)) {
                 pnMarkProved(node)
+                if (forceAdd) {
+                    node.proof = Some(parent)
+                }
             }
         }
     }
@@ -293,18 +301,74 @@ let ptAddNewVar = (tree, typ):int => {
     tree.maxVar = tree.maxVar + 1
     let newVar = tree.maxVar
     tree.newVars->Belt_HashSet.add([typ, newVar])
-    switch tree.dbg {
+    switch tree.ptDbg {
         | None => ()
         | Some({exprToStr, newVars}) => newVars->Js.Array2.push(exprToStr([typ, newVar]))->ignore
     }
     newVar
 }
 
-let ptAddDisjPair = (tree, n, m) => {
-    tree.disj->disjAddPair( n,m )
-    switch tree.dbg {
-        | None => ()
-        | Some({exprToStr, disj}) => disj->Js.Array2.push(exprToStr([n,m]))->ignore
+let jstfEqSrc = (jstfArgs:array<expr>, jstfLabel:string, src:exprSrc):bool => {
+    switch src {
+        | VarType | Hypothesis(_) | AssertionWithErr(_) => false
+        | Assertion({args:srcArgs, frame}) => {
+            if (jstfLabel != frame.label) {
+                false
+            } else {
+                let jLen = jstfArgs->Js.Array2.length
+                let hLen = frame.hyps->Js.Array2.length
+                if (jLen > hLen) {
+                    false
+                } else {
+                    let ji = ref(0)
+                    let hi = ref(0)
+                    let eq = ref(true)
+                    while (eq.contents && ji.contents < jLen && hi.contents < hLen) {
+                        let hyp = frame.hyps[hi.contents]
+                        if (hyp.typ == F) {
+                            hi := hi.contents + 1
+                        } else {
+                            eq := jstfArgs[ji.contents]->exprEq(srcArgs[hi.contents]->pnGetExpr)
+                            ji := ji.contents + 1
+                            hi := hi.contents + 1
+                        }
+                    }
+                    while (eq.contents && hi.contents < hLen) {
+                        if (frame.hyps[hi.contents].typ == F) {
+                            hi := hi.contents + 1
+                        } else {
+                            eq := false
+                        }
+                    }
+                    eq.contents && ji.contents == jLen && hi.contents == hLen
+                }
+            }
+        }
     }
 }
 
+let ptPrintStats = ( tree:proofTree ):string => {
+    let nodes = tree.nodes->Belt_HashMap.toArray->Js.Array2.map(((_,node)) => node)
+    let nodeCnt = nodes->Js.Array2.length
+    let nodeCntFl = nodeCnt->Belt.Int.toFloat
+    Js.Console.log2(`nodeCnt`, nodeCnt)
+    let provedNodeCnt = nodes->Js.Array2.filter(node => node.proof->Belt_Option.isSome)->Js.Array2.length
+    Js.Console.log3(`provedNodeCnt`, provedNodeCnt, Common.floatToPctStr(provedNodeCnt->Belt_Int.toFloat /. nodeCntFl))
+    let invalidFloatingCnt = nodes->Js.Array2.filter(node => node.isInvalidFloating)->Js.Array2.length
+    Js.Console.log3(`invalidFloatingCnt`, invalidFloatingCnt, Common.floatToPctStr(invalidFloatingCnt->Belt_Int.toFloat /. nodeCntFl))
+    switch tree.ptDbg {
+        | None => "Debug is off"
+        | Some(dbg) => {
+            let unprovedNodes = nodes
+                ->Js.Array2.filter(node => 
+                    node.proof->Belt_Option.isNone && !node.isInvalidFloating
+                    // && node.fParents->Belt_Option.mapWithDefault(0, fParents => fParents->Js_array2.length) > 0
+                )
+            unprovedNodes->Js.Array2.sortInPlaceWith((a,b) => 
+                a.expr->Js_array2.length - b.expr->Js_array2.length
+            )->ignore
+            let unprovedExprs = unprovedNodes->Js.Array2.map(node => node.expr)
+            unprovedExprs->Js.Array2.map(dbg.exprToStr)->Js.Array2.joinWith("\n")
+        }
+    }
+}

@@ -1,5 +1,6 @@
 open Expln_React_common
 open Expln_React_Mui
+open Expln_utils_promise
 open MM_react_common
 open Local_storage_utils
 open Common
@@ -9,10 +10,14 @@ let make = (
     ~proofText:string, 
     ~proofTableWithTypes:string, 
     ~proofTableWithoutTypes:string,
-    ~onClose:unit=>unit
+    ~onClose:unit=>unit,
 ) => {
-    let (showProofTable, setShowProofTable) = useStateFromLocalStorageBool("export-proof-show-proof-table", false)
-    let (essentialsOnly, setEssentialsOnly) = useStateFromLocalStorageBool("export-proof-essentials-only", false)
+    let (showProofTable, setShowProofTable) = useStateFromLocalStorageBool(
+        ~key="export-proof-show-proof-table", ~default=false
+    )
+    let (essentialsOnly, setEssentialsOnly) = useStateFromLocalStorageBool(
+        ~key="export-proof-essentials-only", ~default=false
+    )
     let (copiedToClipboard, setCopiedToClipboard) = React.useState(() => None)
 
     let getTextToCopy = () => {
@@ -29,17 +34,18 @@ let make = (
     }
 
     let actCopyToClipboard = () => {
-        copyToClipboard(getTextToCopy())
-        setCopiedToClipboard(timerId => {
-            switch timerId {
-                | None => ()
-                | Some(timerId) => clearTimeout(timerId)
-            }
-            Some(setTimeout(
-                () => setCopiedToClipboard(_ => None),
-                1000
-            ))
-        })
+        copyToClipboard(getTextToCopy())->promiseMap(_ => {
+            setCopiedToClipboard(timerId => {
+                switch timerId {
+                    | None => ()
+                    | Some(timerId) => clearTimeout(timerId)
+                }
+                Some(setTimeout(
+                    () => setCopiedToClipboard(_ => None),
+                    1000
+                ))
+            })
+        })->ignore
     }
 
     let rndProofTable = () => {

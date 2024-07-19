@@ -10,15 +10,51 @@ type webSrcSettings = {
     trusted: bool,
 }
 
+type frameRestrict = {
+    useDisc:bool,
+    useDepr:bool,
+    useTranDepr:bool,
+}
+
+type allowedFrms = {
+    inSyntax: frameRestrict,
+    inEssen: frameRestrict,
+}
+
 type settings = {
     parens: string,
-    asrtsToSkip: array<string>,
-    asrtsToSkipRegex: string,
+    asrtsToSkip: array<string>, //deprecated
+
+    descrRegexToDisc: string,
+    labelRegexToDisc: string,
+    descrRegexToDepr: string,
+    labelRegexToDepr: string,
+    discColor:string,
+    deprColor:string,
+    tranDeprColor:string,
+    allowedFrms:allowedFrms,
+
     editStmtsByLeftClick:bool,
     defaultStmtType:string,
+    defaultStmtLabel:string,
+    initStmtIsGoal:bool,
     checkSyntax:bool,
+    stickGoalToBottom:bool,
+    autoMergeStmts:bool,
     typeSettings: array<typeSettings>,
+    unifMetavarPrefix:string,
     webSrcSettings: array<webSrcSettings>,
+    longClickEnabled:bool,
+    longClickDelayMs:int,
+    hideContextSelector:bool,
+    showVisByDefault:bool,
+    editorHistMaxLength:int,
+
+    useDefaultTransforms:bool,
+    useCustomTransforms:bool,
+    customTransforms:string,
 }
 
 let markUrlAsTrusted: (settings, string) => settings
+
+let settingsGetTypeColors: settings => Belt_HashMapString.t<string>

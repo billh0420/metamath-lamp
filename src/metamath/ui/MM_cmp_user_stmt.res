@@ -2,15 +2,17 @@ open MM_syntax_tree
 open Expln_React_common
 open Expln_React_Mui
 open MM_wrk_editor
+open MM_wrk_settings
 open MM_react_common
 open MM_context
 open MM_substitution
 open MM_parenCounter
-open MM_proof_tree
 open MM_proof_tree_dto
+open MM_parser
 open Expln_React_Modal
 open Local_storage_utils
 open Common
+open Expln_utils_promise
 
 @val external window: {..} = "window"
 
@@ -20,22 +22,34 @@ let rndIconButton = (
     ~active:bool=true, 
     ~title:option<string>=?, 
     ~color:option<string>=Some("primary"),
+    ~key:option<string>=?,
     ()
 ) => {
     <span ?title>
-        <IconButton disabled={!active} onClick={_ => onClick()} ?color> icon </IconButton>
+        <IconButton ?key disabled={!active} onClick={_ => onClick()} ?color> icon </IconButton>
     </span>
 }
 
 type state = {
     newText: string,
     infoExpanded: bool,
+    visExpanded: bool,
+}
+
+type viewOptions = {
+    showCheckbox:bool,
+    showLabel:bool,
+    showType:bool,
+    showJstf:bool,
+    inlineMode:bool,
+    smallBtns:bool,
 }
 
 let makeInitialState = () => {
     {
         newText: "",
-        infoExpanded: false
+        infoExpanded: false,
+        visExpanded: false,
     }
 }
 
@@ -53,85 +67,25 @@ let setInfoExpanded = (st,infoExpanded):state => {
     }
 }
 
-let leftClickHnd = (clbk:unit=>unit):(ReactEvent.Mouse.t => unit) => {
-    mouseEvt => {
-        if (mouseEvt->ReactEvent.Mouse.button == 0 
-            && !(mouseEvt->ReactEvent.Mouse.altKey)
-            && !(mouseEvt->ReactEvent.Mouse.ctrlKey)
-            && !(mouseEvt->ReactEvent.Mouse.shiftKey)
-        ) {
-            clbk()
-        }
+let setVisExpanded = (st,visExpanded):state => {
+    {
+        ...st,
+        visExpanded
     }
 }
 
-let altLeftClickHnd = (clbk:unit=>unit):(ReactEvent.Mouse.t => unit) => {
-    mouseEvt => {
-        if (mouseEvt->ReactEvent.Mouse.button == 0 
-            && mouseEvt->ReactEvent.Mouse.altKey
-            && !(mouseEvt->ReactEvent.Mouse.ctrlKey)
-            && !(mouseEvt->ReactEvent.Mouse.shiftKey)
-        ) {
-            clbk()
-        }
-    }
+let lastSyntaxTypeLocStorKey = "editor-last-syntax-type"
+
+let getLastSyntaxType = ():option<string> => {
+    locStorReadString(lastSyntaxTypeLocStorKey)
 }
 
-let textToSyntaxTree = (
-    ~wrkCtx:mmContext,
-    ~syms:array<stmtSym>,
-    ~syntaxTypes:array<int>,
-    ~frms: Belt_MapString.t<frmSubsData>,
-    ~parenCnt: parenCnt,
-    ~lastSyntaxType:option<string>,
-    ~onLastSyntaxTypeChange:string => unit,
-):result<syntaxTreeNode,string> => {
-    if (syntaxTypes->Js_array2.length == 0) {
-        Error(`Could not determine syntax types.`)
-    } else {
-        switch syms->Js.Array2.find(stmtSym => wrkCtx->ctxSymToInt(stmtSym.sym)->Belt_Option.isNone) {
-            | Some({sym:unrecognizedSymbol}) => {
-                Error(`The statement contains an unrecognized symbol: '${unrecognizedSymbol}'`)
-            }
-            | None => {
-                let lastSyntaxTypeInt = lastSyntaxType->Belt.Option.flatMap(wrkCtx->ctxSymToInt)->Belt.Option.getWithDefault(0)
-                let syntaxTypes = syntaxTypes->Js.Array2.copy->Js.Array2.sortInPlaceWith((a,b) => {
-                    if (a == lastSyntaxTypeInt) {
-                        -1
-                    } else if (b == lastSyntaxTypeInt) {
-                        1
-                    } else {
-                        a - b
-                    }
-                })
-                let stmt = syms->Js_array2.map(stmtSym => stmtSym.sym)->ctxSymsToIntsExn(wrkCtx, _)
-                let expr = stmt->Js_array2.sliceFrom(1)
-                let proofTree = MM_provers.proveSyntaxTypes(
-                    ~wrkCtx=wrkCtx,
-                    ~frms,
-                    ~parenCnt,
-                    ~exprs=[expr],
-                    ~syntaxTypes,
-                    ()
-                )
-                switch proofTree->ptGetSyntaxProof(expr) {
-                    | None => Error(`Could not prove this statement is of any of the types: ${wrkCtx->ctxIntsToStrExn(syntaxTypes)}`)
-                    | Some(node) => {
-                        switch (lastSyntaxType, wrkCtx->ctxIntToSym((node->pnGetExpr)[0])) {
-                            | (None, Some(provedSyntaxTypeStr)) => onLastSyntaxTypeChange(provedSyntaxTypeStr)
-                            | (Some(lastSyntaxTypeStr), Some(provedSyntaxTypeStr)) => {
-                                if (lastSyntaxTypeStr != provedSyntaxTypeStr) {
-                                    onLastSyntaxTypeChange(provedSyntaxTypeStr)
-                                }
-                            }
-                            | _ => ()
-                        }
-                        buildSyntaxTreeFromProofTree( ~ctx=wrkCtx, ~proofTree, ~typeStmt=node->pnGetExpr, )
-                    }
-                }
-            }
-        }
-    }
+let setLastSyntaxType = (lastSyntaxType:string):unit => {
+    locStorWriteString(lastSyntaxTypeLocStorKey, lastSyntaxType)
+}
+
+let callbackOpt = (clbkOpt:option<'a=>unit>):('a=>unit) => {
+    a => clbkOpt->Belt_Option.forEach(clbk => clbk(a))
 }
 
 let rndSymbol = (
@@ -139,27 +93,62 @@ let rndSymbol = (
     ~key:string,
     ~sym:string,
     ~color:option<string>,
-    ~onClick:option<ReactEvent.Mouse.t=>unit>=?,
+    ~longClickEnabled:bool,
+    ~longClickDelayMs:int,
+    ~symRename:option<Belt_HashMapString.t<string>>=?,
+    ~onLeftClick:option<unit=>unit>=?,
+    ~onAltLeftClick:option<unit=>unit>=?,
     ~spaceBackgroundColor:option<string>=?,
     ~symbolBackgroundColor:option<string>=?,
     ~cursor:string="auto",
+    ~title:option<string>=?,
     ()
 ):reElem => {
     <React.Fragment key>
         {
             if (isFirst) {
-                React.null
+                <></>
             } else {
-                <span 
-                    ?onClick 
-                    style=ReactDOM.Style.make(
-                        ~backgroundColor=?spaceBackgroundColor,
-                        ~cursor,
-                        ()
-                    )
-                > 
-                    {" "->React.string} 
-                </span>
+                let style = ReactDOM.Style.make( ~backgroundColor=?spaceBackgroundColor, ~cursor, () )
+                if (longClickEnabled) {
+                    <LongClickSpan
+                        longClickEnabled
+                        longClickDelayMs
+                        onShortClick=?{onLeftClick->Belt.Option.map(onLeftClick => {
+                            (clickAttrs:option<UseLongClick.clickAttrs>) => {
+                                switch clickAttrs {
+                                    | None => onLeftClick()
+                                    | Some({alt}) => {
+                                        if (alt) {
+                                            callbackOpt(onAltLeftClick)()
+                                        } else {
+                                            onLeftClick()
+                                        }
+                                    }
+                                }
+                            }
+                        })}
+                        onLongClick=?onAltLeftClick
+                        style
+                        ?title
+                    > 
+                        {" "->React.string} 
+                    </LongClickSpan>
+                } else {
+                    <span
+                        onClick={
+                            clickHnd2(
+                                clickClbkMake(~act = callbackOpt(onLeftClick), ()),
+                                clickClbkMake(~alt=true, ~act=callbackOpt(onAltLeftClick), ()),
+                            )
+                        }
+                        style
+                        ?title
+                    > 
+                        {" "->React.string} 
+                    </span>
+                }
+                
             }
         }
         {
@@ -167,52 +156,94 @@ let rndSymbol = (
                 | None => ("black","normal")
                 | Some(color) => (color,"bold")
             }
-            <span ?onClick style=ReactDOM.Style.make( ~color, ~fontWeight, ~backgroundColor=?symbolBackgroundColor, ~cursor, () ) >
-                {sym->React.string}
-            </span>
+            let style = ReactDOM.Style.make( ~color, ~fontWeight, ~backgroundColor=?symbolBackgroundColor, ~cursor, () ) 
+            if (longClickEnabled) {
+                <LongClickSpan 
+                    longClickEnabled
+                    longClickDelayMs
+                    onShortClick=?{onLeftClick->Belt.Option.map(onLeftClick => {
+                        (clickAttrs:option<UseLongClick.clickAttrs>) => {
+                            switch clickAttrs {
+                                | None => onLeftClick()
+                                | Some({alt}) => {
+                                    if (alt) {
+                                        callbackOpt(onAltLeftClick)()
+                                    } else {
+                                        onLeftClick()
+                                    }
+                                }
+                            }
+                        }
+                    })}
+                    onLongClick=?onAltLeftClick
+                    style
+                    ?title
+                >
+                    {
+                        React.string(
+                            symRename->Belt_Option.flatMap(Belt_HashMapString.get(_, sym))->Belt.Option.getWithDefault(sym)
+                        )
+                    }
+                </LongClickSpan>
+            } else {
+                <span 
+                    onClick={
+                        clickHnd2(
+                            clickClbkMake(~act = callbackOpt(onLeftClick), ()),
+                            clickClbkMake(~alt=true, ~act=callbackOpt(onAltLeftClick), ()),
+                        )
+                    }
+                    style
+                    ?title
+                >
+                    {
+                        React.string(
+                            symRename->Belt_Option.flatMap(Belt_HashMapString.get(_, sym))->Belt.Option.getWithDefault(sym)
+                        )
+                    }
+                </span>
+            }
+            
         }
     </React.Fragment>
 }
 
 let rndContText = (
     ~stmtCont:stmtCont,
-    ~onTextClick:option<int=>unit>=?,
-    ~onTreeClick:option<int=>unit>=?,
-    ~editStmtsByLeftClick:bool=true,
+    ~symRename:option<Belt_HashMapString.t<string>>=?,
+    ~onTextLeftClick:option<int=>unit>=?,
+    ~onTextAltLeftClick:option<int=>unit>=?,
+    ~onTreeLeftClick:option<int=>unit>=?,
+    ~onTreeAltLeftClick:option<int=>unit>=?,
+    ~longClickEnabled:bool=false,
+    ~longClickDelayMs:int=0,
+    ~cursor:string="auto",
     ~renderSelection:bool=false,
+    ~title:option<string>=?,
     ()
 ) => {
     switch stmtCont {
-        | Text(syms) => {
-            let onClick = idx => onTextClick->Belt_Option.map(onTextClick => {
-                if (editStmtsByLeftClick) {
-                    altLeftClickHnd(() => onTextClick(idx))
-                } else {
-                    leftClickHnd(() => onTextClick(idx))
-                }
-            })
-            let cursor = if (editStmtsByLeftClick) {"auto"} else {"pointer"}
+        | Text({syms}) => {
             syms->Js.Array2.mapi((stmtSym,i) => {
                 rndSymbol(
                     ~isFirst = i==0,
                     ~key=i->Belt.Int.toString,
                     ~sym=stmtSym.sym,
                     ~color=stmtSym.color,
-                    ~onClick=?onClick(i),
+                    ~onLeftClick = ?{onTextLeftClick->Belt_Option.map( onTextLeftClick => () => onTextLeftClick(i) )},
+                    ~onAltLeftClick = ?{onTextAltLeftClick->Belt_Option.map( onTextAltLeftClick => 
+                        () => onTextAltLeftClick(i)
+                    )},
+                    ~longClickEnabled,
+                    ~longClickDelayMs,
                     ~cursor,
+                    ~symRename?,
+                    ~title?,
                     ()
                 )
             })->React.array
         }
         | Tree({exprTyp, root}) => {
-            let onClick = id => onTreeClick->Belt_Option.map(onTreeClick => {
-                if (editStmtsByLeftClick) {
-                    altLeftClickHnd(() => onTreeClick(id))
-                } else {
-                    leftClickHnd(() => onTreeClick(id))
-                }
-            })
-            let cursor = if (editStmtsByLeftClick) {"auto"} else {"pointer"}
             let (clickedId,selectedIds) = getIdsOfSelectedNodes(stmtCont)
             let elems = []
             elems->Js.Array2.push(
@@ -222,6 +253,10 @@ let rndContText = (
                     ~sym=exprTyp,
                     ~color=None,
                     ~cursor,
+                    ~symRename?,
+                    ~longClickEnabled=false,
+                    ~longClickDelayMs=0,
+                    ~title?,
                     ()
                 )
             )->ignore
@@ -245,7 +280,14 @@ let rndContText = (
                                     ~key=id->Belt.Int.toString,
                                     ~sym,
                                     ~color,
-                                    ~onClick=?onClick(id),
+                                    ~onLeftClick = ?{onTreeLeftClick->Belt_Option.map( onTreeLeftClick => 
+                                        () => onTreeLeftClick(id) 
+                                    )},
+                                    ~onAltLeftClick = ?{onTreeAltLeftClick->Belt_Option.map( onTreeAltLeftClick => 
+                                        () => onTreeAltLeftClick(id)
+                                    )},
+                                    ~longClickEnabled,
+                                    ~longClickDelayMs,
                                     ~spaceBackgroundColor=?{
                                         if (renderSelection && symbolIsHighlighted && selectionIsOn.contents) {
                                             Some("#ADD6FF")
@@ -265,6 +307,8 @@ let rndContText = (
                                         } 
                                     },
                                     ~cursor,
+                                    ~symRename?,
+                                    ~title?,
                                     ()
                                 )
                             )->ignore
@@ -283,19 +327,33 @@ let rndContText = (
 let symbolsNotAllowedInLabelRegex = %re("/[\s:]+/g")
 let removeSymbolsNotAllowedInLabel = str => str->Js_string2.replaceByRe(symbolsNotAllowedInLabelRegex, "")
 
+let stmtPartMarginLeft = "10px"
+let stmtPartMarginTopInt = 5
+let stmtPartMarginTop = stmtPartMarginTopInt->Belt.Int.toString ++ "px"
+
+let checkMarkSymbol = "\u2713"
+
 let rndProofStatus = (
     ~proofStatus:option<proofStatus>,
+    ~longClickEnabled:bool,
+    ~longClickDelayMs:int,
     ~readyTooltip:option<string>=?,
     ~waitingTooltip:option<string>=?,
     ~noJstfTooltip:option<string>=?,
     ~jstfIsIncorrectTooltip:option<string>=?,
     ~onReadyIconClicked:option<unit=>unit>=?,
+    ~onReadyIconAltClicked:option<unit=>unit>=?,
+    ~onWaitingIconClicked:option<unit=>unit>=?,
     ~onErrorIconClicked:option<unit=>unit>=?,
     ~onNoJstfIconClicked:option<unit=>unit>=?,
     ()
 ):React.element => {
     let commonStyle = ReactDOM.Style.make(
-        ~fontWeight="bold", ~width="13px", ~display="inline-block",
+        ~fontWeight="bold", 
+        ~width="13px", 
+        ~display="inline-block",
+        ~marginLeft=stmtPartMarginLeft, 
+        ~marginTop=stmtPartMarginTop, 
         ()
     )
     switch proofStatus {
@@ -306,22 +364,64 @@ let rndProofStatus = (
         | Some(status) => {
             switch status {
                 | Ready =>
-                    <span 
-                        title=?readyTooltip
-                        style={commonStyle->ReactDOM.Style.combine(ReactDOM.Style.make(
-                            ~color="green",
-                            ~cursor=if (onReadyIconClicked->Belt_Option.isSome) {"pointer"} else {"default"}, 
-                            ()
-                        ))}
-                        onClick={_=>onReadyIconClicked->Belt_Option.forEach(clbk => clbk())}
-                    >{React.string("\u2713")}</span>
+                    let style = commonStyle->ReactDOM.Style.combine(ReactDOM.Style.make(
+                        ~color="green",
+                        ~cursor=
+                            if (onReadyIconClicked->Belt_Option.isSome || onReadyIconAltClicked->Belt_Option.isSome) {
+                                "pointer"
+                            } else {
+                                "default"
+                            }, 
+                        ()
+                    ))
+                    switch onReadyIconAltClicked {
+                        | None => {
+                            <span 
+                                title=?readyTooltip
+                                style
+                                onClick={_=>callbackOpt(onReadyIconClicked)()}
+                            >{React.string(checkMarkSymbol)}</span>
+                        }
+                        | Some(onReadyIconAltClicked) => {
+                            <LongClickSpan
+                                onClick={
+                                    clickHnd2(
+                                        clickClbkMake(~act = callbackOpt(onReadyIconClicked), ()),
+                                        clickClbkMake(~alt=true, ~act=onReadyIconAltClicked, ()),
+                                    )
+                                }
+                                longClickEnabled
+                                longClickDelayMs
+                                onShortClick={
+                                    (clickAttrs:option<UseLongClick.clickAttrs>) => {
+                                        switch clickAttrs {
+                                            | None => callbackOpt(onReadyIconClicked)()
+                                            | Some({alt}) => {
+                                                if (alt) {
+                                                    onReadyIconAltClicked()
+                                                } else {
+                                                    callbackOpt(onReadyIconClicked)()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                onLongClick=onReadyIconAltClicked
+
+                                title=?readyTooltip
+                                style
+                            >{React.string(checkMarkSymbol)}</LongClickSpan>
+                        }
+                    }
                 | Waiting =>
                     <span 
                         title=?waitingTooltip
                         style={commonStyle->ReactDOM.Style.combine(ReactDOM.Style.make(
                             ~color="orange",
+                            ~cursor=if (onWaitingIconClicked->Belt_Option.isSome) {"pointer"} else {"default"}, 
                             ()
                         ))}
+                        onClick={_=>onWaitingIconClicked->Belt_Option.forEach(clbk => clbk())}
                     >{React.string("\u223F")}</span>
                 | NoJstf =>
                     <span 
@@ -416,14 +516,24 @@ module VisualizedJstf = {
     }, (_,_) => true )
 }
 
+let userStmtTypeAndIsGoalFromStr = (stmtTypeStr:string):(userStmtType,bool) => {
+    switch stmtTypeStr {
+        | "e" => (E,false)
+        | "p" => (P,false)
+        | "g" => (P,true)
+        | _ => raise(MmException({msg:`Cannot convert '${stmtTypeStr}' to userStmtType and isGoal.`}))
+    }
+}
+
 type props = {
     modalRef:modalRef,
 
     settingsVer:int,
+    settings:settings,
     preCtxVer:int,
     varsText:string,
     wrkCtx:option<mmContext>,
-    frms: Belt_MapString.t<frmSubsData>,
+    frms: frms,
     parenCnt: parenCnt,
     syntaxTypes:array<int>,
     parensMap:Belt_HashMapString.t<string>,
@@ -431,16 +541,22 @@ type props = {
     preCtxColors:Belt_HashMapString.t<string>,
     wrkCtxColors:Belt_HashMapString.t<string>,
     editStmtsByLeftClick:bool,
+    longClickEnabled:bool,
+    longClickDelayMs:int,
     defaultStmtType:string,
+    showVisByDefault:bool,
 
-    visualizationIsOn:bool,
+    viewOptions:viewOptions,
+    readOnly:bool,
+    parenAc:bool,
+    toggleParenAc: unit=>unit,
 
     stmt:userStmt, 
     onLabelEditRequested:unit=>unit, 
     onLabelEditDone:string=>unit, 
     onLabelEditCancel:string=>unit,
     onTypEditRequested:unit=>unit, 
-    onTypEditDone:userStmtType=>unit,
+    onTypEditDone:(userStmtType,bool)=>unit,
     onContEditRequested:unit=>unit, 
     onContEditDone:string=>unit, 
     onContEditCancel:string=>unit,
@@ -449,17 +565,32 @@ type props = {
     onJstfEditDone:string=>unit, 
     onJstfEditCancel:string=>unit,
 
+    checkboxDisabled:bool,
+    checkboxChecked:bool,
+    checkboxOnChange:bool=>unit,
+
     onGenerateProof:unit=>unit,
     onDebug:unit=>unit,
     addStmtAbove:string=>unit,
     addStmtBelow:string=>unit,
+    setShowTabs:bool=>unit,
+    openFrameExplorer:string=>unit,
 }
 
 let propsAreSame = (a:props,b:props):bool => {
     a.settingsVer == b.settingsVer
+    && a.settings.customTransforms == b.settings.customTransforms
     && a.preCtxVer == b.preCtxVer
     && a.varsText == b.varsText
-    && a.visualizationIsOn == b.visualizationIsOn
+
+    && a.viewOptions.showCheckbox == b.viewOptions.showCheckbox
+    && a.viewOptions.showLabel == b.viewOptions.showLabel
+    && a.viewOptions.showType == b.viewOptions.showType
+    && a.viewOptions.showJstf == b.viewOptions.showJstf
+    && a.viewOptions.inlineMode == b.viewOptions.inlineMode
+    && a.viewOptions.smallBtns == b.viewOptions.smallBtns
+    && a.readOnly == b.readOnly
+    && a.parenAc == b.parenAc
 
     && a.stmt.label == b.stmt.label
     && a.stmt.labelEditMode == b.stmt.labelEditMode
@@ -470,12 +601,21 @@ let propsAreSame = (a:props,b:props):bool => {
     && a.stmt.jstfText == b.stmt.jstfText
     && a.stmt.jstfEditMode == b.stmt.jstfEditMode
 
+    && a.stmt.stmtErr == b.stmt.stmtErr
+    && a.stmt.syntaxErr == b.stmt.syntaxErr
+    && a.stmt.unifErr == b.stmt.unifErr
+
+    && a.checkboxDisabled == b.checkboxDisabled
+    && a.checkboxChecked == b.checkboxChecked
+
+
     && a.stmt.src == b.stmt.src
     && a.stmt.proofStatus === b.stmt.proofStatus
 }
 
 let make = React.memoCustomCompareProps( ({
     modalRef,
+    settings,
     wrkCtx,
     frms,
     parenCnt,
@@ -496,17 +636,29 @@ let make = React.memoCustomCompareProps( ({
     onJstfEditCancel,
     onGenerateProof,
     onDebug,
+    checkboxDisabled,
+    checkboxChecked,
+    checkboxOnChange,
     typeColors,
     preCtxColors,
     wrkCtxColors,
-    visualizationIsOn,
+    viewOptions,
+    readOnly,
+    parenAc,
+    toggleParenAc,
     editStmtsByLeftClick,
+    longClickEnabled,
+    longClickDelayMs,
     defaultStmtType,
+    showVisByDefault,
     addStmtAbove,
     addStmtBelow,
+    setShowTabs,
+    openFrameExplorer,
 }:props) =>  {
     let (state, setState) = React.useState(_ => makeInitialState())
     let labelRef = React.useRef(Js.Nullable.null)
+    let jstfRef = React.useRef(Js.Nullable.null)
     let stmtTextFieldRef = React.useRef(Js.Nullable.null)
 
     let (syntaxTreeWasRequested, setSyntaxTreeWasRequested) = React.useState(() => None)
@@ -530,7 +682,14 @@ let make = React.memoCustomCompareProps( ({
                 }
             setState(setNewText(_,contStr))
         } else if (stmt.jstfEditMode) {
-            setState(setNewText(_,stmt.jstfText))
+            setState(st => {
+                st->setNewText(
+                    switch stmt.typ {
+                        | E => defaultJstfForHyp
+                        | P => stmt.jstfText
+                    }
+                )
+            })
         }
         None
     }, [stmt.labelEditMode, stmt.typEditMode, stmt.contEditMode, stmt.jstfEditMode])
@@ -581,26 +740,36 @@ let make = React.memoCustomCompareProps( ({
     }, [newTextCursorPosition])
 
     let actBuildSyntaxTree = (clickedIdx:int):unit => {
-        let lastSyntaxTypeLocStorKey = "editor-last-syntax-type"
         switch wrkCtx {
             | None => setSyntaxTreeError(_ => Some(`Cannot build a syntax tree because there was an error setting MM context.`))
             | Some(wrkCtx) => {
                 switch stmt.cont {
                     | Tree(_) => setSyntaxTreeError(_ => Some(`Cannot build a syntax tree because stmtCont is a tree.`))
-                    | Text(syms) => {
+                    | Text({text, syms}) => {
                         switch textToSyntaxTree( 
-                            ~wrkCtx, ~syms, ~syntaxTypes, ~frms, ~parenCnt, 
-                            ~lastSyntaxType=locStorReadString(lastSyntaxTypeLocStorKey),
-                            ~onLastSyntaxTypeChange = locStorWriteString(lastSyntaxTypeLocStorKey, _),
+                            ~wrkCtx, ~syms=[syms->Js_array2.map(s => s.sym)->Js_array2.sliceFrom(_, 1)], 
+                            ~syntaxTypes, ~frms, 
+                            ~frameRestrict=settings.allowedFrms.inSyntax,
+                            ~parenCnt,
+                            ~lastSyntaxType=getLastSyntaxType(),
+                            ~onLastSyntaxTypeChange=setLastSyntaxType,
                         ) {
                             | Error(msg) => setSyntaxTreeError(_ => Some(msg))
-                            | Ok(syntaxTree) => {
-                                onSyntaxTreeUpdated(Tree({
-                                    exprTyp:syms[0].sym, 
-                                    root:addColorsToSyntaxTree( ~tree=syntaxTree, ~preCtxColors, ~wrkCtxColors ), 
-                                    clickedNodeId:getNodeIdBySymIdx(~tree=syntaxTree, ~symIdx=clickedIdx),
-                                    expLvl:0,
-                                }))
+                            | Ok(syntaxTrees) => {
+                                switch (syntaxTrees[0]) {
+                                    | Error(msg) => setSyntaxTreeError(_ => Some(msg))
+                                    | Ok(syntaxTree) => {
+                                        let stmtContTreeData = {
+                                            text,
+                                            exprTyp:syms[0].sym, 
+                                            root:addColorsToSyntaxTree( ~tree=syntaxTree, ~preCtxColors, ~wrkCtxColors, () ), 
+                                            clickedNodeId:getNodeIdBySymIdx(~tree=syntaxTree, ~symIdx=clickedIdx)
+                                                                ->Belt.Option.map(id => (id,Js_date.make())),
+                                            expLvl:0,
+                                        }
+                                        onSyntaxTreeUpdated(Tree(stmtContTreeData->incExpLvlIfConstClicked))
+                                    }
+                                }
                             }
                         }
                     }
@@ -618,7 +787,7 @@ let make = React.memoCustomCompareProps( ({
                         setSyntaxTreeWasRequested(_ => None)
                         actBuildSyntaxTree(clickedIdx)
                     },
-                    0
+                    10
                 )->ignore
             }
         }
@@ -626,7 +795,18 @@ let make = React.memoCustomCompareProps( ({
     }, [syntaxTreeWasRequested])
 
     let actToggleInfoExpanded = () => {
-        setState(st => setInfoExpanded(st, !st.infoExpanded))
+        setState(st => {
+            let st = if (st.infoExpanded) {
+                setVisExpanded(st, false)
+            } else {
+                setVisExpanded(st, showVisByDefault)
+            }
+            setInfoExpanded(st, !st.infoExpanded)
+        })
+    }
+
+    let actToggleVisExpanded = () => {
+        setState(st => setVisExpanded(st, !st.visExpanded))
     }
 
     let actExpandProof = expanded => {
@@ -635,6 +815,10 @@ let make = React.memoCustomCompareProps( ({
 
     let actNewTextUpdated = newText => {
         setState(setNewText(_, newText))
+    }
+
+    let actJstfEditRequested = () => {
+        onJstfEditRequested()
     }
 
     let before = (str:string, pos:int):string => str->Js.String2.substring(~from=0,~to_=pos)
@@ -651,21 +835,25 @@ let make = React.memoCustomCompareProps( ({
         let prevLen = state.newText->Js.String2.length
         let newLen = newText->Js.String2.length
         let newText = 
-            if (prevLen + 1 == newLen && selectionStart > 1 && " " == newText->Js.String2.charAt(selectionStart - 1)) {
-                let pos = selectionStart-1
-                let prevBefore = state.newText->before(pos)
-                let newBefore = newText->before(pos)
-                let prevAfter = state.newText->after(pos-1)
-                let newAfter = newText->after(pos)
-                if ( prevBefore == newBefore && prevAfter == newAfter ) {
-                    let lastSymbol = getLastSymbol(newBefore)
-                    switch parensMap->Belt_HashMapString.get(lastSymbol) {
-                        | None => newText
-                        | Some(closingParen) => {
-                            let newText = newBefore ++ "  " ++ closingParen ++ newAfter
-                            setNewTextCursorPosition(_ => Some(selectionStart))
-                            newText
+            if (parenAc) {
+                if (prevLen + 1 == newLen && selectionStart > 1 && " " == newText->Js.String2.charAt(selectionStart - 1)) {
+                    let pos = selectionStart-1
+                    let prevBefore = state.newText->before(pos)
+                    let newBefore = newText->before(pos)
+                    let prevAfter = state.newText->after(pos-1)
+                    let newAfter = newText->after(pos)
+                    if ( prevBefore == newBefore && prevAfter == newAfter ) {
+                        let lastSymbol = getLastSymbol(newBefore)
+                        switch parensMap->Belt_HashMapString.get(lastSymbol) {
+                            | None => newText
+                            | Some(closingParen) => {
+                                let newText = newBefore ++ "  " ++ closingParen ++ newAfter
+                                setNewTextCursorPosition(_ => Some(selectionStart))
+                                newText
+                            }
                         }
+                    } else {
+                        newText
                     }
                 } else {
                     newText
@@ -685,7 +873,12 @@ let make = React.memoCustomCompareProps( ({
     }
     
     let actTypEditDone = newTypStr => {
-        onTypEditDone(userStmtTypeFromStr(newTypStr))
+        let (newTyp,newIsGoal) = userStmtTypeAndIsGoalFromStr(newTypStr)
+        onTypEditDone(newTyp,newIsGoal)
+    }
+
+    let actTypEditCancel = () => {
+        onTypEditDone(stmt.typ, stmt.isGoal)
     }
     
     let actContEditDone = () => {
@@ -719,40 +912,21 @@ let make = React.memoCustomCompareProps( ({
     }
 
     let actTreeNodeClicked = (nodeId) => {
-        actUpdateSyntaxTree(treeData => {...treeData, clickedNodeId:Some(nodeId), expLvl:0})
+        actUpdateSyntaxTree(treeData => {
+            {...treeData, clickedNodeId:Some((nodeId,Js_date.make())), expLvl:0}->incExpLvlIfConstClicked
+        })
     }
 
     let actUnselect = () => {
         actUpdateSyntaxTree(treeData => {...treeData, clickedNodeId:None})
     }
 
-    let updateExpLavel = (treeData:stmtContTreeData, inc:bool):stmtContTreeData => {
-        let update = if (inc) {incExpLvl} else {decExpLvl}
-        let prevTreeData = ref(treeData)
-        let prevNum = ref(getNumberOfSelectedSymbols(prevTreeData.contents))
-        let newTreeData = ref(update(prevTreeData.contents))
-        let newNum = ref(getNumberOfSelectedSymbols(newTreeData.contents))
-        while (
-            prevNum.contents == newNum.contents
-            && (
-                inc && newTreeData.contents.expLvl < newTreeData.contents.root.height
-                || !inc && newTreeData.contents.expLvl > 0
-            )
-        ) {
-            prevTreeData := newTreeData.contents
-            prevNum := getNumberOfSelectedSymbols(prevTreeData.contents)
-            newTreeData := update(prevTreeData.contents)
-            newNum := getNumberOfSelectedSymbols(newTreeData.contents)
-        }
-        newTreeData.contents
-    }
-
     let actExpandSelection = () => {
-        actUpdateSyntaxTree(updateExpLavel(_,true))
+        actUpdateSyntaxTree(updateExpLevel(_,true))
     }
 
     let actShrinkSelection = () => {
-        actUpdateSyntaxTree(updateExpLavel(_,false))
+        actUpdateSyntaxTree(updateExpLevel(_,false))
     }
 
     let actAddStmtAbove = () => {
@@ -778,24 +952,26 @@ let make = React.memoCustomCompareProps( ({
     }
 
     let actCopyToClipboard = () => {
-        switch getSelectedSymbols(stmt.cont) {
+        switch getSelectedText(stmt.cont) {
             | None => ()
-            | Some(syms) => {
-                copyToClipboard(syms->Js_array2.joinWith(" "))
-                setCopiedToClipboard(timerId => {
-                    switch timerId {
-                        | None => ()
-                        | Some(timerId) => clearTimeout(timerId)
-                    }
-                    Some(setTimeout(
-                        () => setCopiedToClipboard(_ => None),
-                        1000
-                    ))
-                })
+            | Some(selectedText) => {
+                copyToClipboard(selectedText)->promiseMap(_ => {
+                    setCopiedToClipboard(timerId => {
+                        switch timerId {
+                            | None => ()
+                            | Some(timerId) => clearTimeout(timerId)
+                        }
+                        Some(setTimeout(
+                            () => setCopiedToClipboard(_ => None),
+                            1000
+                        ))
+                    })
+                })->ignore
             }
         }
     }
 
+    // getSelectedRange() - returns what part of a statement is selected as Some((first, last)); range ends just before last
     let getSelectedRange = ():option<(int,int)> => {
         switch stmt.cont {
             | Text(_) => None
@@ -840,54 +1016,211 @@ let make = React.memoCustomCompareProps( ({
         }
     }
 
+    let replaceSelectionWithNewText = (newText:string):option<string> => {
+        switch getSelectedRange() {
+            | None => None
+            | Some((low, high)) =>
+                let currentText = stmt.cont->contToStr
+                Some(
+                    currentText->Js.String2.slice(~from=0, ~to_=low)
+                        ++ newText
+                        ++ currentText->Js.String2.sliceToEnd(~from=high)
+                )
+        }
+    }
+
+    let actPasteFromClipboard = () => {
+        readFromClipboard()->promiseMap(clipboardContents => {
+            clipboardContents->replaceSelectionWithNewText->Belt_Option.forEach(newStmtContent => {
+                // Propagate changes to MM_cmp_editor
+                onContEditDone(newStmtContent)
+            })
+        })->ignore
+    }
+
     let actEditSelection = () => {
         setSelectionRange(_ => getSelectedRange())
         onContEditRequested()
     }
 
+    let actOpenFrameExplorer = label => {
+        setShowTabs(true)
+        openFrameExplorer(label)
+    }
+
+    let actInsertTransformResultAbove = result => {
+        result->replaceSelectionWithNewText->Belt_Option.forEach(addStmtAbove)
+    }
+
+    let actInsertTransformResultBelow = result => {
+        result->replaceSelectionWithNewText->Belt_Option.forEach(addStmtBelow)
+    }
+
+    let actInsertTransformResultToCurrent = result => {
+        result->replaceSelectionWithNewText->Belt_Option.forEach(onContEditDone)
+    }
+
+    let actOpenFragmentTransform = (selectedSubtree:childNode) => {
+        let transformsText = if (settings.useDefaultTransforms) {
+            if (settings.useCustomTransforms) {
+                [MM_frag_transform_default_script.fragmentTransformsDefaultScript, settings.customTransforms]
+            } else {
+                [MM_frag_transform_default_script.fragmentTransformsDefaultScript]
+            }
+        } else {
+            if (settings.useCustomTransforms) {
+                [settings.customTransforms]
+            } else {
+                []
+            }
+        }
+        openModal(modalRef, () => React.null)->promiseMap(modalId => {
+            updateModal(modalRef, modalId, () => {
+                let closeDialog = ()=>closeModal(modalRef, modalId)
+                <MM_cmp_frag_transform
+                    selectedSubtree
+                    transformsText
+                    onCancel=closeDialog
+                    onInsertAbove={transformedSelectionText => {
+                        actInsertTransformResultAbove(transformedSelectionText)
+                        closeDialog()
+                    }}
+                    onInsertBelow={transformedSelectionText => {
+                        actInsertTransformResultBelow(transformedSelectionText)
+                        closeDialog()
+                    }}
+                    onUpdateCurrent={transformedSelectionText => {
+                        actInsertTransformResultToCurrent(transformedSelectionText)
+                        closeDialog()
+                    }}
+                />
+            })
+        })->ignore
+    }
+
     let rndLabel = () => {
         if (stmt.labelEditMode) {
-            <Row>
+            <Col 
+                spacing=0.
+                style=ReactDOM.Style.make(
+                    ~marginLeft=stmtPartMarginLeft, 
+                    ~marginTop=stmtPartMarginTop, 
+                    ()
+                )
+            >
                 <TextField
                     size=#small
-                    style=ReactDOM.Style.make(~width="100px", ())
+                    style=ReactDOM.Style.make(~width="150px", ())
                     autoFocus=true
                     value=state.newText
                     onChange=evt2str(str => actNewTextUpdated(str->removeSymbolsNotAllowedInLabel))
-                    onKeyDown=kbrdHnd(~onEnter=actLabelEditDone, ~onEsc=actLabelEditCancel, ())
+                    onKeyDown=kbrdHnd2(
+                        kbrdClbkMake(~key=keyEnter, ~act=actLabelEditDone, ()),
+                        kbrdClbkMake(~key=keyEsc, ~act=actLabelEditCancel, ()),
+                    )
                     title="Enter to save, Esc to cancel"
                 />
-                {rndIconButton(~icon=<MM_Icons.Save/>, ~active= state.newText->Js.String2.trim != "",  
-                    ~onClick=actLabelEditDone, ~title="Save, Enter", ())}
-                {rndIconButton(~icon=<MM_Icons.CancelOutlined/>,
-                    ~onClick=actLabelEditCancel, ~title="Cancel, Esc", ~color=None, ())}
-            </Row>
+                <Row>
+                    {rndIconButton(~icon=<MM_Icons.Save/>, ~active= state.newText->Js.String2.trim != "",  
+                        ~onClick=actLabelEditDone, ~title="Save, Enter", ())}
+                    {rndIconButton(~icon=<MM_Icons.CancelOutlined/>,
+                        ~onClick=actLabelEditCancel, ~title="Cancel, Esc", ~color=None, ())}
+                </Row>
+            </Col>
         } else {
-            <span 
-                ref=ReactDOM.Ref.domRef(labelRef)
-                onClick=leftClickHnd(onLabelEditRequested) 
-                title="<left-click> to change"
-                style=ReactDOM.Style.make(~overflowWrap="normal", ~whiteSpace="nowrap", ())
+            let chgLabelShortcutName = if (longClickEnabled) {"Long click (Alt + Left-click)"} else {"Alt + Left-click"}
+            let showJstfShortcutName = if (longClickEnabled) {"Short click (Left-click)"} else {"Left-click"}
+            <LongClickSpan
+                onClick=clickHnd2(
+                    clickClbkMake(~alt=true, ~act=onLabelEditRequested, ()),
+                    clickClbkMake(~act=actToggleInfoExpanded, ()),
+                )
+                longClickEnabled
+                longClickDelayMs
+                onShortClick = {
+                    (clickAttrs:option<UseLongClick.clickAttrs>) => {
+                        switch clickAttrs {
+                            | Some({alt:true}) => onLabelEditRequested()
+                            | _ => actToggleInfoExpanded()
+                        }
+                    }
+                }
+                onLongClick=onLabelEditRequested
+                style=ReactDOM.Style.make(
+                    ~cursor=?{if (readOnly) {None} else {Some("pointer")}}, 
+                    ~marginLeft=stmtPartMarginLeft, 
+                    ~marginTop=stmtPartMarginTop, 
+                    ~display="inline-block",
+                    ()
+                )
+                title=?{
+                    if (readOnly) {
+                        None
+                    } else {
+                        Some(
+                            chgLabelShortcutName ++ " to change. " 
+                                ++ "Alt is sometimes labelled Opt. " 
+                                ++ showJstfShortcutName ++ " to show/hide the justification for provable."
+                        )
+                    }
+                }
             >
                 {React.string(stmt.label)}
-            </span>
+            </LongClickSpan>
         }
     }
 
     let rndSelectionButtons = () => {
-        <Row alignItems=#center>
+        let style = if (viewOptions.smallBtns) {
+            Some(ReactDOM.Style.make(~padding="0px", ~minWidth="30px", ~minHeight="26px", ()))
+        } else {
+            None
+        }
+        <Row alignItems=#center style=ReactDOM.Style.make(~marginTop="3px", ())>
             <ButtonGroup variant=#outlined size=#small >
-                <Button title="Expand selection" onClick={_=>actExpandSelection()}> <MM_Icons.ZoomOutMap/> </Button>
-                <Button title="Shrink selection" onClick={_=>actShrinkSelection()}> <MM_Icons.ZoomInMap/> </Button>
-                <Button title="Add new statement above" onClick={_=>actAddStmtAbove()}> 
-                    <MM_Icons.Logout style=ReactDOM.Style.make(~transform="rotate(-90deg)", ()) />
-                </Button>
-                <Button title="Add new statement below" onClick={_=>actAddStmtBelow()}> 
-                    <MM_Icons.Logout style=ReactDOM.Style.make(~transform="rotate(90deg)", ()) />
-                </Button>
-                <Button title="Copy to the clipboard" onClick={_=>actCopyToClipboard()}> <MM_Icons.ContentCopy/> </Button>
-                <Button title="Edit" onClick={_=>actEditSelection()}> <MM_Icons.Edit/> </Button>
-                <Button title="Unselect" onClick={_=>actUnselect()}> <MM_Icons.CancelOutlined/> </Button>
+                <Button title="Expand selection" onClick={_=>actExpandSelection()} ?style> <MM_Icons.ZoomOutMap/> </Button>
+                <Button title="Shrink selection" onClick={_=>actShrinkSelection()} ?style> <MM_Icons.ZoomInMap/> </Button>
+                {
+                    if (readOnly) {React.null} else {
+                        <Button title="Add new step above" onClick={_=>actAddStmtAbove()} ?style> 
+                            <MM_Icons.Logout style=ReactDOM.Style.make(~transform="rotate(-90deg)", ()) />
+                        </Button>
+                    }
+                }
+                {
+                    if (readOnly) {React.null} else {
+                        <Button title="Add new step below" onClick={_=>actAddStmtBelow()} ?style> 
+                            <MM_Icons.Logout style=ReactDOM.Style.make(~transform="rotate(90deg)", ()) />
+                        </Button>
+                    }
+                }
+                {
+                    if (readOnly) {React.null} else {
+                        <Button 
+                            title="Transform" 
+                            onClick={_=>{
+                                stmt.cont->getSelectedSubtreeFromStmtCont->Belt.Option.forEach(actOpenFragmentTransform)
+                            }} 
+                            ?style
+                        > 
+                            <MM_Icons.ShapeLineSharp/>
+                        </Button>
+                    }
+                }
+                <Button title="Copy to the clipboard" onClick={_=>actCopyToClipboard()} ?style> <MM_Icons.ContentCopy/> </Button>
+                {
+                    if (readOnly) {React.null} else {
+                        <Button title="Paste from the clipboard to the selection" onClick={_=>actPasteFromClipboard()} ?style>
+                            <MM_Icons.ContentPaste/>
+                        </Button>
+                    }
+                }
+                {
+                    if (readOnly) {React.null} else {
+                        <Button title="Edit" onClick={_=>actEditSelection()} ?style> <MM_Icons.Edit/> </Button>
+                    }
+                }
+                <Button title="Unselect" onClick={_=>actUnselect()} ?style> <MM_Icons.CancelOutlined/> </Button>
             </ButtonGroup>
             {
                 if (copiedToClipboard->Belt.Option.isSome) {
@@ -897,19 +1230,40 @@ let make = React.memoCustomCompareProps( ({
         </Row>
     }
 
-    let rndCont = () => {
+    let rndCont = ():reElem => {
         if (stmt.contEditMode) {
             let windowWidth = window["innerWidth"]
-            let labelWidth = switch labelRef.current->Js.Nullable.toOption {
-                | None => 0
-                | Some(domElem) => ReactDOM.domElementToObj(domElem)["offsetWidth"]
+            let textFieldWidth = if (viewOptions.inlineMode) {
+                windowWidth - 40
+            } else {
+                let checkBoxWidth = if (!viewOptions.showCheckbox) {0} else { 48 } 
+                let labelWidth = if (!viewOptions.showLabel) {0} else { switch labelRef.current->Js.Nullable.toOption {
+                    | None => 0
+                    | Some(domElem) => ReactDOM.domElementToObj(domElem)["offsetWidth"] + 10
+                } } 
+                let typWidth = if (!viewOptions.showType) {0} else { 28 } 
+                let jstfWidth = if (!viewOptions.showJstf) {0} else { switch jstfRef.current->Js.Nullable.toOption {
+                    | None => 0
+                    | Some(domElem) => ReactDOM.domElementToObj(domElem)["offsetWidth"] + 10
+                } }
+                Js.Math.max_int(
+                    200,
+                    windowWidth - checkBoxWidth - labelWidth - typWidth - jstfWidth - 40
+                )
             }
-            <Row>
+            <Col 
+                spacing=0.
+                style=ReactDOM.Style.make(
+                    ~marginLeft=stmtPartMarginLeft, 
+                    ~marginTop=stmtPartMarginTop, 
+                    ()
+                )
+            >
                 <TextField
                     inputRef=ReactDOM.Ref.domRef(stmtTextFieldRef)
                     size=#small
                     style=ReactDOM.Style.make(
-                        ~width = (windowWidth - 215 - labelWidth)->Belt_Int.toString ++ "px", 
+                        ~width = (textFieldWidth)->Belt_Int.toString ++ "px", 
                         ()
                     )
                     inputProps={
@@ -923,30 +1277,73 @@ let make = React.memoCustomCompareProps( ({
                         let value = (evt->ReactEvent.Form.target)["value"]
                         actStmtContentUpdated(value, selectionStart)
                     }}
-                    onKeyDown=kbrdHnd(~onEnter=actContEditDone, ~onEsc=actContEditCancel, ())
+                    onKeyDown=kbrdHnd3(
+                        kbrdClbkMake(~key=keyEnter, ~act=actContEditDone, ()),
+                        kbrdClbkMake(~key=keyEsc, ~act=actContEditCancel, ()),
+                        kbrdClbkMake(~alt=true, ~key="p", ~act=toggleParenAc, ()),
+                    )
                     title="Enter to save, Shift+Enter to start a new line, Esc to cancel"
                 />
-                {rndIconButton(~icon=<MM_Icons.Save/>, ~active= state.newText->Js.String2.trim != "",  
-                    ~onClick=actContEditDone, ~title="Save, Enter", ())}
-                {rndIconButton(~icon=<MM_Icons.CancelOutlined/>,  
-                    ~onClick=actContEditCancel, ~title="Cancel, Esc", ~color=None, ())}
-            </Row>
+                <Row>
+                    {
+                        if (parenAc) {
+                            rndIconButton(~icon=<MM_Icons.Code/>, 
+                                ~onClick=toggleParenAc, 
+                                ~title="Parentheses autocomplete is On; press Alt+P to turn it Off", 
+                                ()
+                            )
+                        } else {
+                            rndIconButton(~icon=<MM_Icons.CodeOff/>, 
+                                ~onClick=toggleParenAc, 
+                                ~title="Parentheses autocomplete is Off; press Alt+P to turn it On", 
+                                ~color=None,
+                                ()
+                            )
+                        }
+                    }
+                    {rndIconButton(~icon=<MM_Icons.Save/>, ~active= state.newText->Js.String2.trim != "",  
+                        ~onClick=actContEditDone, ~title="Save, Enter", ())}
+                    {rndIconButton(~icon=<MM_Icons.CancelOutlined/>,  
+                        ~onClick=actContEditCancel, ~title="Cancel, Esc", ~color=None, ())}
+                </Row>
+            </Col>
         } else {
             let textIsSelected = switch stmt.cont {
                 | Text(_) => false
                 | Tree({clickedNodeId}) => clickedNodeId->Belt.Option.isSome
             }
+            let howToSelect =
+                if (editStmtsByLeftClick) {
+                    if (longClickEnabled) {
+                        "<long-click> (Alt+<left-click>) to select"
+                    } else {
+                        "Alt+<left-click> to select"
+                    }
+                } else {
+                    if (longClickEnabled) {
+                        "<short-click> to select"
+                    } else {
+                        "<left-click> to select"
+                    }
+                }
+            let title =
+                if (editStmtsByLeftClick) {
+                    if (longClickEnabled) {
+                        "<short-click> to change, " ++ howToSelect
+                    } else {
+                        "<left-click> to change, " ++ howToSelect
+                    }
+                } else {
+                    if (longClickEnabled) {
+                        "<long-click> (Alt+<left-click>) to change, " ++ howToSelect
+                    } else {
+                        "Alt+<left-click> to change, " ++ howToSelect
+                    }
+                }
             let elems = [
                 <Paper 
-                    onClick={
-                        if (editStmtsByLeftClick) {
-                            leftClickHnd(onContEditRequested)
-                        } else {
-                            altLeftClickHnd(onContEditRequested)
-                        }
-                    }
                     style=ReactDOM.Style.make(
-                        ~padding="1px 10px", 
+                        ~padding="1px 3px",
                         ~backgroundColor=
                             if (stmt.stmtErr->Belt_Option.isSome || stmt.syntaxErr->Belt_Option.isSome) {
                                 "rgb(255,230,230)"
@@ -955,21 +1352,39 @@ let make = React.memoCustomCompareProps( ({
                         ~fontSize="1.3em",
                         ()
                     ) 
-                    title={
-                        if (editStmtsByLeftClick) {
-                            "<left-click> to change, Alt+<left-click> to select"
-                        } else {
-                            "Alt + <left-click> to change, <left-click> to select"
-                        }
-                    }
                 >
                     {
+                        let onTextLeftClick = if (editStmtsByLeftClick) {
+                            _ => onContEditRequested()
+                        } else {
+                            idx => setSyntaxTreeWasRequested(_ => Some(idx))
+                        }
+                        let onTextAltLeftClick = if (!editStmtsByLeftClick) {
+                            _ => onContEditRequested()
+                        } else {
+                            idx => setSyntaxTreeWasRequested(_ => Some(idx))
+                        }
+                        let onTreeLeftClick = if (editStmtsByLeftClick) {
+                            _ => onContEditRequested()
+                        } else {
+                            actTreeNodeClicked
+                        }
+                        let onTreeAltLeftClick = if (!editStmtsByLeftClick) {
+                            _ => onContEditRequested()
+                        } else {
+                            actTreeNodeClicked
+                        }
                         rndContText(
                             ~stmtCont=stmt.cont, 
-                            ~onTextClick=idx=>setSyntaxTreeWasRequested(_ => Some(idx)),
-                            ~onTreeClick=actTreeNodeClicked,
+                            ~onTextLeftClick,
+                            ~onTextAltLeftClick,
+                            ~onTreeLeftClick,
+                            ~onTreeAltLeftClick,
+                            ~longClickEnabled,
+                            ~longClickDelayMs,
                             ~renderSelection=true,
-                            ~editStmtsByLeftClick,
+                            ~cursor = if (editStmtsByLeftClick) {"auto"} else {"pointer"},
+                            ~title={if (readOnly) {howToSelect} else {title}},
                             ()
                         )
                     }
@@ -986,7 +1401,14 @@ let make = React.memoCustomCompareProps( ({
                 )->ignore
             }
 
-            <Col>
+            <Col 
+                spacing=0.
+                style=ReactDOM.Style.make(
+                    ~marginLeft=stmtPartMarginLeft, 
+                    ~marginTop=stmtPartMarginTop, 
+                    ()
+                )
+            >
                 {elems->React.array}
             </Col>
         }
@@ -994,84 +1416,232 @@ let make = React.memoCustomCompareProps( ({
 
     let rndTyp = () => {
         if (stmt.typEditMode) {
-            <FormControl size=#small >
-                <Select
-                    value=""
-                    onChange=evt2str(actTypEditDone)
+            let typStrLowerCase = switch stmt.typ {
+                | E => "e"
+                | P => if (stmt.isGoal) {"g"} else {"p"}
+            }
+            <Col spacing=0.>
+                <FormControl
+                    size=#small
+                    style=ReactDOM.Style.make(
+                        ~marginLeft=stmtPartMarginLeft,
+                        ~marginTop=stmtPartMarginTop,
+                        ()
+                    )
                 >
-                    <MenuItem value="e">{React.string("H")}</MenuItem>
-                    <MenuItem value="p">{React.string("P")}</MenuItem>
-                </Select>
-            </FormControl>
+                    <Select
+                        value={typStrLowerCase}
+                        onChange=evt2str(actTypEditDone)
+                    >
+                        <MenuItem value="e">{React.string("H - (Essential) Hypothesis")}</MenuItem>
+                        <MenuItem value="p">{React.string("P - Provable Statement")}</MenuItem>
+                        <MenuItem value="g">{React.string("G - Goal Statement")}</MenuItem>
+                    </Select>
+                </FormControl>
+                {
+                    rndIconButton(
+                        ~icon=<MM_Icons.CancelOutlined/>, ~onClick=actTypEditCancel, ~title="Cancel", ~color=None, ()
+                    )
+                }
+            </Col>
         } else {
             let typStr = switch stmt.typ {
                 | E => "H"
-                | P => "P"
+                | P => if (stmt.isGoal) {"G"} else {"P"}
             }
-            <span 
-                onClick={evt=>{
-                    altLeftClickHnd(onTypEditRequested)(evt)
-                    leftClickHnd(actToggleInfoExpanded)(evt)
-                }}
-                style=ReactDOM.Style.make(~cursor="pointer", ~fontWeight="bold", ())
-                title="Alt+<left-click> to change statement type between P (provable) and H (hypothesis). Alt is sometimes labelled Opt. Left-click to show/hide the justification for provable."
+            let chgTypShortcutName = if (longClickEnabled) {"Long click (Alt + Left-click)"} else {"Alt + Left-click"}
+            let showJstfShortcutName = if (longClickEnabled) {"Short click (Left-click)"} else {"Left-click"}
+            <LongClickSpan
+                onClick=clickHnd2(
+                    clickClbkMake(~alt=true, ~act=onTypEditRequested, ()),
+                    clickClbkMake(~act=actToggleInfoExpanded, ()),
+                )
+                longClickEnabled
+                longClickDelayMs
+                onShortClick = {
+                    (clickAttrs:option<UseLongClick.clickAttrs>) => {
+                        switch clickAttrs {
+                            | Some({alt:true}) => onTypEditRequested()
+                            | _ => actToggleInfoExpanded()
+                        }
+                    }
+                }
+                onLongClick=onTypEditRequested
+                style=ReactDOM.Style.make(
+                    ~cursor=?{if (readOnly) {None} else {Some("pointer")}}, 
+                    ~fontWeight="bold", 
+                    ~marginLeft=stmtPartMarginLeft, 
+                    ~marginTop=stmtPartMarginTop, 
+                    ~display="inline-block",
+                    ()
+                )
+                title=?{
+                    if (readOnly) {
+                        None
+                    } else {
+                        Some(
+                            chgTypShortcutName 
+                                ++ " to change step type between P (provable), G (goal) and H (hypothesis). " 
+                                ++ "Alt is sometimes labelled Opt. " 
+                                ++ showJstfShortcutName ++ " to show/hide the justification for provable."
+                        )
+                    }
+                }
             >
-                {React.string(typStr->Js_string2.toUpperCase)}
-            </span>
+                {React.string(typStr)}
+            </LongClickSpan>
         }
     }
 
-    let rndJstf = () => {
+    let visualizationIsAvailable = wrkCtx->Belt.Option.isSome
+        && stmt.proofTreeDto->Belt.Option.isSome
+        && stmt.src->Belt.Option.isSome
+
+    let getFrmLabelBkgColor = (label:string):option<string> => {
+        switch frms->frmsGetByLabel(label) {
+            | None => None
+            | Some(frm) => MM_react_common.getFrmLabelBkgColor(frm.frame, settings)
+        }
+    }
+
+    let rndJstf = (~isInline:bool, ~textFieldWidth:string):reElem => {
         if (stmt.jstfEditMode) {
-            <Row>
+            <Col 
+                spacing=0.
+                style=ReactDOM.Style.make(
+                    ~marginLeft=stmtPartMarginLeft, 
+                    ~marginTop=stmtPartMarginTop, 
+                    ()
+                )
+            >
                 <TextField
                     size=#small
                     label="Justification"
-                    style=ReactDOM.Style.make(~width="600px", ())
+                    style=ReactDOM.Style.make(~width=textFieldWidth, ())
                     autoFocus=true
                     multiline=true
                     value=state.newText
                     onChange=evt2str(actNewTextUpdated)
-                    onKeyDown=kbrdHnd(~onEnter=actJstfEditDone, ~onEsc=actJstfEditCancel, ())
+                    onKeyDown=kbrdHnd2(
+                        kbrdClbkMake(~key=keyEnter, ~act=actJstfEditDone, ()),
+                        kbrdClbkMake(~key=keyEsc, ~act=actJstfEditCancel, ()),
+                    )
                     title="Enter to save, Esc to cancel"
                 />
-                {rndIconButton(~icon=<MM_Icons.Save/>, ~active=true,  ~onClick=actJstfEditDone,
-                    ~title="Save, Enter", ())}
-                {rndIconButton(~icon=<MM_Icons.CancelOutlined/>,  
-                    ~onClick=actJstfEditCancel, ~title="Cancel, Esc", ~color=None, ())}
-            </Row>
+                <Row>
+                    {rndIconButton(~icon=<MM_Icons.Save/>, ~active=true,  ~onClick=actJstfEditDone,
+                        ~title="Save, Enter", ())}
+                    {rndIconButton(~icon=<MM_Icons.CancelOutlined/>,
+                        ~onClick=actJstfEditCancel, ~title="Cancel, Esc", ~color=None, ())}
+                    {rndIconButton(~icon=<MM_Icons.DeleteForever/>,
+                                ~onClick=actJstfDeleted, ~title="Clear", ~color=Some("red"), ())}
+                </Row>
+            </Col>
         } else {
-            let jstfText = if (stmt.jstfText == "") { " " } else { stmt.jstfText }
-            let padding = if (jstfText->Js_string2.trim == "") { "10px 30px" } else { "3px" }
-            <Row >
-                <Paper 
-                    onClick=leftClickHnd(onJstfEditRequested) 
-                    style=ReactDOM.Style.make( ~padding, ~marginTop="5px", () )
-                    title="<left-click> to change"
-                >
-                    {React.string(jstfText)}
-                </Paper>
-                {
-                    if (jstfText->Js_string2.trim == "") {
-                        React.null
-                    } else {
+            let jstfTextStr = if (stmt.typ == E) { "HYP" } else { stmt.jstfText }
+            let jstfText = if (stmt.typ == E) { jstfTextStr->React.string } else {
+                switch parseJstf(jstfTextStr) {
+                    | Error(_) | Ok(None) => jstfTextStr->React.string
+                    | Ok(Some({args, label})) => {
                         <span>
-                            {rndIconButton(~icon=<MM_Icons.DeleteForever/>,
-                                ~onClick=actJstfDeleted, ~title="Clear", ~color=None, ())}
+                            {React.string(args->Js_array2.joinWith(" ") ++ " : ")}
+                            <span 
+                                className="underline-on-hover"
+                                style=ReactDOM.Style.make(
+                                    ~cursor="pointer", 
+                                    ~backgroundColor=?getFrmLabelBkgColor(label),
+                                    ~borderRadius="3px",
+                                    ()
+                                )
+                                onClick=clickHnd2(
+                                    clickClbkMake(~alt=true, ~act=actJstfEditRequested, ()),
+                                    clickClbkMake(~act=()=>actOpenFrameExplorer(label), ()),
+                                )
+                            >
+                                {label->React.string}
+                            </span>
                         </span>
+                    }
+                }
+            }
+            let padding = if (jstfTextStr->Js_string2.trim == "") { "11px 16px" } else { "1px" }
+            let title =
+                if (longClickEnabled) {
+                    "<long-click> (Alt+<left-click>) to change; click on the label to open a proof explorer tab"
+                } else {
+                    "Alt+<left-click> to change; click on the label to open a proof explorer tab"
+                }
+            <Row
+                spacing=0.
+                style=ReactDOM.Style.make(
+                    ~marginLeft=stmtPartMarginLeft, 
+                    ~marginTop=stmtPartMarginTop, 
+                    ()
+                )
+                alignItems=#center
+            >
+                <LongClickPaper
+                    longClickEnabled
+                    longClickDelayMs
+                    onShortClick={
+                        (clickAttrs:option<UseLongClick.clickAttrs>) => {
+                            switch clickAttrs {
+                                | Some({alt:true}) => actJstfEditRequested()
+                                | _ => ()
+                            }
+                        }
+                    }
+                    onLongClick=actJstfEditRequested
+                    ref_=ReactDOM.Ref.domRef(jstfRef) 
+                    onClick=clickHnd(~alt=true, ~act=actJstfEditRequested, ())
+                    style=ReactDOM.Style.make( 
+                        ~padding, 
+                        ~overflowWrap="normal", 
+                        ~whiteSpace="nowrap", 
+                        ()
+                    )
+                    title=?{if (readOnly) {None} else {Some(title)}}
+                >
+                    jstfText
+                </LongClickPaper>
+                {
+                    if (isInline) {
+                        <span style=ReactDOM.Style.make(~display="none", ())/>
+                    } else {
+                        let btns = []
+                        if (jstfTextStr->Js_string2.trim != "") {
+                            btns->Js.Array2.push(
+                                rndIconButton(~icon=<MM_Icons.DeleteForever/>, ~key="d",
+                                    ~onClick=actJstfDeleted, ~title="Delete justification", ~color=None, ()
+                                )
+                            )->ignore
+                        }
+                        btns->Js.Array2.push(
+                            rndIconButton(~icon=<MM_Icons.VisibilityOff/>, ~key="h",
+                                ~onClick=actToggleInfoExpanded, ~title="Hide justification", ~color=None, ()
+                            )
+                        )->ignore
+                        if (visualizationIsAvailable) {
+                            btns->Js.Array2.push(
+                                rndIconButton(
+                                    ~icon=<MM_Icons.AccountTree style=ReactDOM.Style.make(~transform="rotate(90deg)", ()) />, 
+                                    ~key="v",
+                                    ~onClick=actToggleVisExpanded, ~title="Show/Hide visualization", ~color=None, ()
+                                )
+                            )->ignore
+                        }
+                        <Row style=ReactDOM.Style.make(~marginLeft="10px", ())>
+                            { btns->React.array }
+                        </Row>
                     }
                 }
             </Row>
         }
     }
 
-    let rndJstfVisualization = () => {
-        if (
-            visualizationIsOn 
-            && wrkCtx->Belt.Option.isSome
-            && stmt.proofTreeDto->Belt.Option.isSome
-            && stmt.src->Belt.Option.isSome
-        ) {
+    let rndJstfVisualization = ():option<reElem> => {
+        if (visualizationIsAvailable) {
+            Some(
                 <VisualizedJstf
                     wrkCtx={wrkCtx->Belt_Option.getExn}
                     proofTreeDto={stmt.proofTreeDto->Belt_Option.getExn}
@@ -1081,73 +1651,198 @@ let make = React.memoCustomCompareProps( ({
                     preCtxColors
                     wrkCtxColors
                 />
+            )
         } else {
-            React.null
+            None
         }
     }
 
-    let rndInfoBody = () => {
-        if (stmt.typ == P) {
-            if (state.infoExpanded || stmt.jstfEditMode) {
-                <Col>
-                    {rndJstf()}
-                    {rndJstfVisualization()}
-                </Col>
+    let rndInfoBody = ():option<reElem> => {
+        if (stmt.typ != P) {
+            None
+        } else {
+            let jstf = if (!viewOptions.showJstf && (state.infoExpanded || stmt.jstfEditMode)) {
+                Some(rndJstf(~isInline=false, ~textFieldWidth="600px"))
             } else {
-                React.null
+                None
             }
+            let jstfVis = if (state.infoExpanded && (state.visExpanded || viewOptions.showJstf)) {
+                rndJstfVisualization()
+            } else {
+                None
+            }
+
+            if (jstf->Belt_Option.isNone && jstfVis->Belt_Option.isNone) {
+                None
+            } else {
+                Some(
+                    <Col spacing=0.>
+                        {jstf->Belt_Option.getWithDefault(React.null)}
+                        {jstfVis->Belt_Option.getWithDefault(React.null)}
+                    </Col>
+                )
+            }
+        }
+    }
+
+    let rndContAndInfoBody = () => {
+        switch rndInfoBody() {
+            | None => rndCont()
+            | Some(infoBody) => {
+                <Col spacing=0.>
+                    {rndCont()}
+                    infoBody
+                </Col>
+            }
+        }
+    }
+
+    let rndProofStatusInner = () => {
+        let readyTooltip =
+            if (longClickEnabled) {
+                "A proof is ready, <long-click> (Alt+<left-click>) to show a completed proof"
+            } else {
+                "A proof is ready, Alt+<left-click> to show a completed proof"
+            }
+        rndProofStatus(
+            ~proofStatus=stmt.proofStatus, 
+            ~longClickEnabled,
+            ~longClickDelayMs,
+            ~readyTooltip,
+            ~waitingTooltip="Justification for this step is correct",
+            ~noJstfTooltip="Justification cannot be determined automatically. Click to debug.",
+            ~jstfIsIncorrectTooltip="Justification is incorrect. Click to debug.",
+            ~onReadyIconClicked=actToggleInfoExpanded,
+            ~onReadyIconAltClicked=onGenerateProof,
+            ~onWaitingIconClicked=actToggleInfoExpanded,
+            ~onErrorIconClicked=onDebug,
+            ~onNoJstfIconClicked=onDebug,
+            ()
+        )
+    }
+
+    let rndProofStatusTd = (tdStyle) => {
+        if (stmt.proofStatus->Belt.Option.isSome) {
+            <td style=tdStyle> { rndProofStatusInner() } </td>
         } else {
             React.null
         }
     }
 
-    <table 
-        style=ReactDOM.Style.make(
-            ~margin="-2px", 
-            ~cursor=if (syntaxTreeWasRequested->Belt.Option.isSome) {"wait"} else {""}, 
-            ()
-        )>
-        <tbody>
-            <tr style=ReactDOM.Style.make(~verticalAlign="top", ())>
-                <td>
-                    {
-                        rndProofStatus(
-                            ~proofStatus=stmt.proofStatus, 
-                            ~readyTooltip="Proof is ready, left-click to generate compressed proof",
-                            ~waitingTooltip="Justification for this statement is correct",
-                            ~noJstfTooltip="Justification cannot be determined automatically. Click to debug.",
-                            ~jstfIsIncorrectTooltip="Justification is incorrect. Click to debug.",
-                            ~onReadyIconClicked=onGenerateProof,
-                            ~onErrorIconClicked=onDebug,
-                            ~onNoJstfIconClicked=onDebug,
-                            ()
-                        )
-                    }
-                </td>
-                <td>
-                    {rndLabel()}
-                </td>
-                <td>
-                    {rndTyp()}
-                </td>
-                <td>
-                    {rndCont()}
-                </td>
-            </tr>
-            <tr>
-                <td>
-                    {React.null}
-                </td>
-                <td>
-                    {React.null}
-                </td>
-                <td>
-                    {React.null}
-                </td>
-                <td>
-                    {rndInfoBody()}
-                </td>
-            </tr>
-        </tbody>
-    </table>
+    let rndProofStatusRow = () => {
+        if (stmt.proofStatus->Belt.Option.isSome) {
+            rndProofStatusInner()
+        } else {
+            <span style=ReactDOM.Style.make(~display="none", ())/>
+        }
+    }
+
+    let rndCheckbox = () => {
+        <Checkbox
+            style=ReactDOM.Style.make(
+                ~marginLeft=stmtPartMarginLeft,
+                ~marginTop=stmtPartMarginTop,
+                ~padding="0px",
+                ()
+            )
+            disabled=checkboxDisabled
+            checked=checkboxChecked
+            onChange=evt2bool(checkboxOnChange)
+        />
+    }
+
+    let rndCheckboxTd = (tdStyle) => {
+        if (viewOptions.showCheckbox) {
+            <td style=tdStyle> {rndCheckbox()} </td>
+        } else {
+            React.null
+        }
+    }
+
+    let rndCheckboxRow = () => {
+        if (viewOptions.showCheckbox) {
+            rndCheckbox()
+        } else {
+            <span style=ReactDOM.Style.make(~display="none", ())/>
+        }
+    }
+
+    let rndLabelTd = (tdStyle) => {
+        if (viewOptions.showLabel) {
+            <td style=tdStyle> {rndLabel()} </td>
+        } else {
+            React.null
+        }
+    }
+
+    let rndLabelRow = () => {
+        if (viewOptions.showLabel) {
+            rndLabel()
+        } else {
+            <span style=ReactDOM.Style.make(~display="none", ())/>
+        }
+    }
+
+    let rndTypTd = (tdStyle) => {
+        if (viewOptions.showType) {
+            <td style=tdStyle> {rndTyp()} </td>
+        } else {
+            React.null
+        }
+    }
+
+    let rndTypRow = () => {
+        if (viewOptions.showType) {
+            rndTyp()
+        } else {
+            <span style=ReactDOM.Style.make(~display="none", ())/>
+        }
+    }
+
+    let rndJstfTd = (tdStyle) => {
+        if (viewOptions.showJstf) {
+            <td style=tdStyle> {rndJstf(~isInline=true, ~textFieldWidth="150px")} </td>
+        } else {
+            React.null
+        }
+    }
+
+    let rndJstfRow = () => {
+        if (viewOptions.showJstf) {
+            rndJstf(~isInline=true, ~textFieldWidth="150px")
+        } else {
+            <span style=ReactDOM.Style.make(~display="none", ())/>
+        }
+    }
+
+    if (viewOptions.inlineMode) {
+        <Row spacing=0. alignItems=#"flex-start">
+            { rndCheckboxRow() }
+            { rndProofStatusRow() }
+            { rndLabelRow() }
+            { rndTypRow() }
+            { rndJstfRow() }
+            { rndContAndInfoBody() }
+        </Row>
+    } else {
+        let tdStyle = ReactDOM.Style.make(~padding="0px", ~borderCollapse="collapse", ())
+        <table 
+            style=ReactDOM.Style.make(
+                ~cursor=if (syntaxTreeWasRequested->Belt.Option.isSome) {"wait"} else {""},
+                ~padding="0px",
+                ~borderCollapse="collapse",
+                ()
+            )>
+            <tbody>
+                <tr style=ReactDOM.Style.make(~verticalAlign="top", ())>
+                    { rndCheckboxTd(tdStyle) }
+                    { rndProofStatusTd(tdStyle) }
+                    { rndLabelTd(tdStyle) }
+                    { rndTypTd(tdStyle) }
+                    { rndJstfTd(tdStyle) }
+                    <td style=tdStyle> {rndContAndInfoBody()} </td>
+                </tr>
+            </tbody>
+        </table>
+    }
 }, propsAreSame)

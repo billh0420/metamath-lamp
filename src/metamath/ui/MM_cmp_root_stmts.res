@@ -44,7 +44,7 @@ let selectProvedStmts = (rootStmtsRendered,flags:array<bool>):array<bool> => {
     })
 }
 
-let updateFlags = (st:state, update:array<bool>=>array<bool>):state => { ...st, flags: update(st.flags)}
+let updateFlags = (st:state, update:array<bool>=>array<bool>):state => {flags: update(st.flags)}
 
 @react.component
 let make = (
@@ -119,7 +119,12 @@ let make = (
                             <td style=ReactDOM.Style.make(~paddingTop, ())>
                                 { 
                                     if (proofStatusesAreAvailable) {
-                                        rndProofStatus(~proofStatus=getProofStatus(stmt), ())
+                                        rndProofStatus(
+                                            ~proofStatus=getProofStatus(stmt), 
+                                            ~longClickEnabled=false,
+                                            ~longClickDelayMs=0,
+                                            ()
+                                        )
                                     } else {
                                         React.null
                                     }

@@ -4,6 +4,7 @@ open MM_wrk_search_asrt
 
 let createFrame = (asrt:expr, varTypes:array<int>):frame => {
     {
+        ord:0,
         isAxiom:false,
         disj: Belt.Map.Int.empty,
         hyps: [],
@@ -15,6 +16,9 @@ let createFrame = (asrt:expr, varTypes:array<int>):frame => {
         numOfArgs: 0,
         descr: None,
         proof: None,
+        isDisc:false,
+        isDepr:false,
+        isTranDepr:false,
         dbg: None,
     }
 }

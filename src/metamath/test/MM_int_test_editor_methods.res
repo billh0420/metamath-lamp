@@ -4,11 +4,13 @@ open MM_proof_tree
 open MM_proof_tree_dto
 open MM_provers
 open MM_wrk_editor
+open MM_wrk_editor_substitution
 open MM_wrk_settings
 open MM_wrk_search_asrt
 open MM_wrk_unify
 open MM_statements_dto
 open MM_wrk_editor_json
+open MM_wrk_pre_ctx_data
 open MM_int_test_utils
 open Common
 
@@ -22,37 +24,71 @@ let createEditorState = (
     ~stopBefore:option<string>=?, 
     ~stopAfter:option<string>=?, 
     ~editorState:option<string>=?,
-    ~asrtsToSkipFilePath:option<string>=?,
     ~debug:option<bool>=?, 
     ()
 ) => {
+    let parens = "( ) { } [ ]"
+    let settings = {
+        parens,
+        asrtsToSkip: [],
+        descrRegexToDisc: "",
+        labelRegexToDisc: "^(ax-frege54c)|(.+OLD)|(.+ALT)$",
+        descrRegexToDepr: "",
+        labelRegexToDepr: "",
+        discColor:"",
+        deprColor:"",
+        tranDeprColor:"",
+        editStmtsByLeftClick:true,
+        initStmtIsGoal: false,
+        defaultStmtLabel: "qed",
+        defaultStmtType: "",
+        unifMetavarPrefix: "&",
+        checkSyntax: true,
+        stickGoalToBottom: true,
+        autoMergeStmts: false,
+        typeSettings: [ ],
+        webSrcSettings: [ ],
+        longClickEnabled: true,
+        longClickDelayMs: 500,
+        hideContextSelector: false,
+        showVisByDefault:false,
+        editorHistMaxLength:0,
+        allowedFrms: {
+            inSyntax: {
+                useDisc:false,
+                useDepr:true,
+                useTranDepr:true,
+            },
+            inEssen: {
+                useDisc:false,
+                useDepr:true,
+                useTranDepr:true,
+            },
+        },
+        useDefaultTransforms:false,
+        useCustomTransforms:false,
+        customTransforms:"",
+    }
+
     let mmFileText = Expln_utils_files.readStringFromFile(mmFilePath)
     let (ast, _) = parseMmFile(~mmFileContent=mmFileText, ~skipComments=true, ~skipProofs=true, ())
-    let ctx = loadContext(ast, ~stopBefore?, ~stopAfter?, ~debug?, ())
+    let ctx = loadContext(
+        ast, 
+        ~stopBefore?, 
+        ~stopAfter?, 
+        ~descrRegexToDisc=settings.descrRegexToDisc->strToRegex->Belt_Result.getExn,
+        ~labelRegexToDisc=settings.labelRegexToDisc->strToRegex->Belt_Result.getExn,
+        ~descrRegexToDepr=settings.descrRegexToDepr->strToRegex->Belt_Result.getExn,
+        ~labelRegexToDepr=settings.labelRegexToDepr->strToRegex->Belt_Result.getExn,
+        ~debug?, 
+        ()
+    )
     while (ctx->getNestingLevel != 0) {
         ctx->closeChildContext
     }
-    let parens = "( ) { } [ ]"
-    ctx->moveConstsToBegin(parens)
-    let settingsV = 1
-    let settings = {
-        parens,
-        asrtsToSkip:
-            switch asrtsToSkipFilePath {
-                | None => []
-                | Some(filePath) => multilineTextToNonEmptyLines(Expln_utils_files.readStringFromFile(filePath))
-            },
-        asrtsToSkipRegex: "",
-        editStmtsByLeftClick:true,
-        defaultStmtType: "",
-        checkSyntax: true,
-        typeSettings: [ ],
-        webSrcSettings: [ ],
-    }
-    let preCtxV = 1
-    let preCtx = ctx
+    
     let st = createInitialEditorState(
-        ~settingsV, ~settings, ~srcs=[], ~preCtxV, ~preCtx, 
+        ~preCtxData=preCtxDataMake(~settings)->preCtxDataUpdate(~ctx=([],ctx), ()),
         ~stateLocStor=
             switch editorState {
                 | None => None
@@ -65,14 +101,16 @@ let createEditorState = (
                 }
             }
     )
-    st->prepareEditorForUnification
+    st->updateEditorStateWithPostupdateActions(s=>s)
 }
 
 let addStmt = (
     st:editorState, 
     ~before:option<stmtId>=?,
     ~typ:option<userStmtType>=?, 
+    ~isGoal:bool=false,
     ~label:option<string>=?, 
+    ~jstf:option<string>=?, 
     ~stmt:string, 
     ()
 ):(editorState,stmtId) => {
@@ -90,7 +128,11 @@ let addStmt = (
         | None => st
     }
     let st = switch typ {
-        | Some(typ) => st->completeTypEditMode(stmtId, typ)
+        | Some(typ) => st->completeTypEditMode(stmtId, typ, isGoal)
+        | None => st
+    }
+    let st = switch jstf {
+        | Some(jstf) => st->completeJstfEditMode(stmtId, jstf)
         | None => st
     }
     let st = st->uncheckAllStmts
@@ -100,11 +142,11 @@ let addStmt = (
 let duplicateStmt = (st, stmtId):(editorState,stmtId) => {
     let st = st->uncheckAllStmts
     let st = st->toggleStmtChecked(stmtId)
-    let st = st->duplicateCheckedStmt
+    let st = st->duplicateCheckedStmt(false)
     if (st.checkedStmtIds->Js.Array2.length != 1) {
         raise(MmException({msg:`duplicateStmt: st.checkedStmtIds->Js.Array2.length != 1`}))
     } else {
-        let newStmtId = st.checkedStmtIds[0]
+        let (newStmtId,_) = st.checkedStmtIds[0]
         let st = st->uncheckAllStmts
         (st->updateEditorStateWithPostupdateActions(st => st), newStmtId)
     }
@@ -141,7 +183,7 @@ let updateStmt = (
             | Some(jstf) => {...stmt, jstfText:jstf}
         }
         let stmt = switch content {
-            | Some(content) => {...stmt, cont:strToCont(content, ())}
+            | Some(_) => stmt
             | None => {
                 switch (contReplaceWhat, contReplaceWith) {
                     | (Some(contReplaceWhat), Some(contReplaceWith)) => {
@@ -159,6 +201,10 @@ let updateStmt = (
         }
         stmt
     })
+    let st = switch content {
+        | Some(content) => st->completeContEditMode(stmtId, content)
+        | None => st
+    }
     st->updateEditorStateWithPostupdateActions(st => st)
 }
 
@@ -253,7 +299,7 @@ let deleteStmts = (st:editorState, ids:array<stmtId> ) => {
     st->updateEditorStateWithPostupdateActions(st => st)
 }
 
-let applySubstitution = (st, ~replaceWhat:string, ~replaceWith:string):editorState => {
+let applySubstitution = (st, ~replaceWhat:string, ~replaceWith:string, ~useMatching:bool):editorState => {
     assertNoErrors(st)
     let st = switch st.wrkCtx {
         | None => raise(MmException({msg:`Cannot applySubstitution when wrkCtx is None.`}))
@@ -261,8 +307,9 @@ let applySubstitution = (st, ~replaceWhat:string, ~replaceWith:string):editorSta
             let wrkSubs = findPossibleSubs(
                 st, 
                 wrkCtx->ctxStrToIntsExn(replaceWhat),
-                wrkCtx->ctxStrToIntsExn(replaceWith)
-            )->Js.Array2.filter(subs => subs.err->Belt_Option.isNone)
+                wrkCtx->ctxStrToIntsExn(replaceWith),
+                useMatching
+            )->Belt.Result.getExn->Js.Array2.filter(subs => subs.err->Belt_Option.isNone)
             if (wrkSubs->Js.Array2.length != 1) {
                 raise(MmException({msg:`Unique substitution was expected in applySubstitution.`}))
             } else {
@@ -282,6 +329,7 @@ let unifyAll = (st):editorState => {
             let proofTree = unifyAll(
                 ~parenCnt = st.parenCnt,
                 ~frms = st.frms,
+                ~allowedFrms = st.settings.allowedFrms,
                 ~wrkCtx,
                 ~rootStmts,
                 ~syntaxTypes=st.syntaxTypes,
@@ -314,6 +362,9 @@ let unifyBottomUp = (
     ~allowNewDisjForExistingVars:bool=true,
     ~allowNewStmts:bool=true,
     ~allowNewVars:bool=true,
+    ~useDisc: option<bool>=?,
+    ~useDepr: option<bool>=?,
+    ~useTranDepr: option<bool>=?,
     ~chooseLabel:option<string>=?,
     ~chooseResult:option<stmtsDto => bool>=?,
     ()
@@ -341,6 +392,14 @@ let unifyBottomUp = (
                     args0:filterRootStmts(rootUserStmts, args0),
                     args1:filterRootStmts(rootUserStmts, args1),
                     maxNumberOfBranches: None,
+                },
+                ~allowedFrms={
+                    inSyntax: st.settings.allowedFrms.inSyntax,
+                    inEssen: {
+                        useDisc: useDisc->Belt_Option.getWithDefault(st.settings.allowedFrms.inEssen.useDisc),
+                        useDepr: useDepr->Belt_Option.getWithDefault(st.settings.allowedFrms.inEssen.useDepr),
+                        useTranDepr: useTranDepr->Belt_Option.getWithDefault(st.settings.allowedFrms.inEssen.useTranDepr),
+                    }
                 },
                 //~onProgress = msg => Js.Console.log(msg),
                 ()

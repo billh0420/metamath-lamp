@@ -28,16 +28,10 @@ type state = {
 }
 
 let makeInitialState = (frms, initialTyp:option<int>) => {
-    if (frms->Belt_MapString.size == 0) {
+    if (frms->frmsSize == 0) {
         raise(MmException({msg:`Cannot search assertions when frms are empty.`}))
     }
-    let allTypes = []
-    frms->Belt_MapString.forEach((_,frm) => {
-        let typ = frm.frame.asrt[0]
-        if (!(allTypes->Js_array2.includes(typ))) {
-            allTypes->Js_array2.push(typ)->ignore
-        }
-    })
+    let allTypes = frms->frmsGetAllTypes
     {
         label: "",
         allTypes,
@@ -55,7 +49,11 @@ let makeInitialState = (frms, initialTyp:option<int>) => {
     }
 }
 
-let setResults = (st,results):state => {
+let setResults = (
+    st,
+    ~results: array<stmtsDto>,
+    ~getFrmLabelBkgColor: string=>option<string>,
+):state => {
     let maxPage = Js.Math.ceil_int(results->Js_array2.length->Belt_Int.toFloat /. st.resultsPerPage->Belt_Int.toFloat)
     {
         ...st,
@@ -77,7 +75,20 @@ let setResults = (st,results):state => {
                         {React.array(
                             result.stmts->Js_array2.mapi((stmt,i) => {
                                 <React.Fragment key={"stmt-" ++ i->Belt_Int.toString} >
-                                    {React.string(stmt.label ++ ": " ++ stmt.exprStr)}
+                                    <span 
+                                        style=ReactDOM.Style.make(
+                                            ~backgroundColor=?{
+                                                if (i == lastStmtIdx) {getFrmLabelBkgColor(stmt.label)} else {None}
+                                            }, 
+                                            ~borderRadius="3px",
+                                            ()
+                                        )
+                                    >
+                                        {React.string(stmt.label)}
+                                    </span>
+                                    <span>
+                                        {React.string(": " ++ stmt.exprStr)}
+                                    </span>
                                     {
                                         if (i != lastStmtIdx) {
                                             <Divider/>
@@ -157,7 +168,7 @@ let make = (
     ~varsText: string,
     ~disjText: string,
     ~wrkCtx: mmContext,
-    ~frms: Belt_MapString.t<frmSubsData>,
+    ~frms: frms,
     ~initialTyp:option<int>,
     ~onTypChange:int=>unit,
     ~onCanceled:unit=>unit,
@@ -165,8 +176,17 @@ let make = (
 ) => {
     let (state, setState) = React.useState(() => makeInitialState(frms, initialTyp))
 
+    let getFrmLabelBkgColor = (label:string):option<string> => {
+        switch frms->frmsGetByLabel(label) {
+            | None => None
+            | Some(frm) => {
+                MM_react_common.getFrmLabelBkgColor(frm.frame, settings)
+            }
+        }
+    }
+
     let actResultsRetrieved = results => {
-        setState(setResults(_, results))
+        setState(setResults(_, ~results, ~getFrmLabelBkgColor))
     }
 
     let makeActTerminate = (modalId:modalId):(unit=>unit) => {
@@ -180,7 +200,10 @@ let make = (
         onTypChange(state.typ)
         let incorrectSymbol = state.patternStr->getSpaceSeparatedValuesAsArray->Js_array2.find(sym => !(wrkCtx->isConst(sym)))
         switch incorrectSymbol {
-            | Some(sym) => setState(setPatternErr(_, Some(`'${sym}' - is not a constant.`)))
+            | Some(sym) => {
+                setState(setPatternErr(_, Some(`'${sym}' - is not a constant.`)))
+                actResultsRetrieved([])
+            }
             | None => {
                 setState(setPatternErr(_, None))
                 openModal(modalRef, () => rndProgress(~text="Searching", ~pct=0. , ()))->promiseMap(modalId => {
@@ -257,6 +280,10 @@ let make = (
             autoFocus=true
             value=state.patternStr
             onChange=evt2str(actPatternChange)
+            onKeyDown=kbrdHnd2(
+                kbrdClbkMake(~key=keyEnter, ~act=actSearch, ()),
+                kbrdClbkMake(~key=keyEsc, ~act=onCanceled, ()),
+            )
         />
     }
     
@@ -267,6 +294,10 @@ let make = (
             style=ReactDOM.Style.make(~width="100px", ())
             value=state.label
             onChange=evt2str(actLabelChange)
+            onKeyDown=kbrdHnd2(
+                kbrdClbkMake(~key=keyEnter, ~act=actSearch, ()),
+                kbrdClbkMake(~key=keyEsc, ~act=onCanceled, ()),
+            )
         />
     }
     

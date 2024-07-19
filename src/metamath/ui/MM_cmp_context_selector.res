@@ -1,4 +1,5 @@
 open Expln_React_Mui
+open Expln_React_common
 open Expln_utils_promise
 open MM_parser
 open MM_react_common
@@ -7,16 +8,22 @@ open Expln_React_Modal
 open MM_wrk_settings
 open MM_wrk_editor
 open Local_storage_utils
+open MM_wrk_pre_ctx_data
+
+type fileText = 
+    | Text(string)
+    | UseAst
 
 type mmSingleScope = {
     id:string,
     srcType:mmFileSourceType,
     fileSrc: option<mmFileSource>,
-    fileText: option<string>,
+    fileText: option<fileText>,
     ast: option<result<mmAstNode,string>>,
     allLabels: array<string>,
     readInstr: readInstr,
     label: option<string>,
+    resetNestingLevel:bool,
 }
 
 type mmScope = {
@@ -25,6 +32,14 @@ type mmScope = {
     singleScopes: array<mmSingleScope>,
     loadedContextSummary: string,
 }
+
+type reloadCtxFunc = (
+    ~srcs:array<mmCtxSrcDto>, 
+    ~settings:settings, 
+    ~force:bool=?, 
+    ~showError:bool=?, 
+    ()
+) => promise<result<unit,string>>
 
 let createEmptySingleScope = (~id:string, ~srcType:mmFileSourceType) => {
     {
@@ -35,7 +50,8 @@ let createEmptySingleScope = (~id:string, ~srcType:mmFileSourceType) => {
         ast:None,
         allLabels:[],
         readInstr:ReadAll,
-        label:None
+        label:None,
+        resetNestingLevel:true,
     }
 }
 
@@ -55,6 +71,7 @@ let setAst = (ss:mmSingleScope, ast) => {...ss, ast}
 let setAllLabels = (ss:mmSingleScope, allLabels) => {...ss, allLabels}
 let setReadInstr = (ss:mmSingleScope, readInstr) => {...ss, readInstr}
 let setLabel = (ss:mmSingleScope, label) => {...ss, label}
+let setResetNestingLevel = (ss:mmSingleScope, resetNestingLevel) => {...ss, resetNestingLevel}
 
 let addSingleScope = (st:mmScope, ~defaultSrcType:mmFileSourceType) => {
     {
@@ -102,8 +119,8 @@ let getSummary = st => {
             let name = getNameFromFileSrc(ss.fileSrc)->Belt_Option.getWithDefault("")
             let readInstr = switch ss.readInstr {
                 | ReadAll => ""
-                | StopBefore => `, stopped before '${ss.label->Belt_Option.getWithDefault("")}'`
-                | StopAfter => `, stopped after '${ss.label->Belt_Option.getWithDefault("")}'`
+                | StopBefore => `, stopped before ${ss.label->Belt_Option.getWithDefault("")}`
+                | StopAfter => `, stopped after ${ss.label->Belt_Option.getWithDefault("")}`
             }
             name ++ readInstr
         })
@@ -119,29 +136,44 @@ let makeActTerminate = (modalRef:modalRef, modalId:modalId):(unit=>unit) => {
 }
 
 let webTypStr = Web->mmFileSourceTypeToStr
+let localTypStr = Local->mmFileSourceTypeToStr
+
+let isReadInstrSame = (ss:mmSingleScope,srcDto:mmCtxSrcDto):bool => {
+    ss.readInstr == srcDto.readInstr->readInstrFromStr
+        && (
+            ss.readInstr == ReadAll 
+                || ss.label->Belt.Option.mapWithDefault(false, ssLabel => ssLabel == srcDto.label) 
+        )
+        && ss.resetNestingLevel == srcDto.resetNestingLevel
+}
+
+let isAstSame = (ss:mmSingleScope,srcDto:mmCtxSrcDto):bool => {
+    switch ss.ast {
+        | Some(Ok(ssAst)) => {
+            switch srcDto.ast {
+                | None => false
+                | Some(dtoAst) => ssAst === dtoAst
+            }
+        }
+        | _ => false
+    }
+}
 
 let isSingleScopeSame = (ss:mmSingleScope,srcDto:mmCtxSrcDto):bool => {
     switch ss.fileSrc {
         | None => false
         | Some(ssFileSrc) => {
             switch ssFileSrc {
-                | Local(_) => false
+                | Local({fileName:ssFileName}) => {
+                    srcDto.typ == localTypStr
+                        && ssFileName == srcDto.fileName 
+                        && isReadInstrSame(ss,srcDto)
+                        && isAstSame(ss,srcDto)
+                }
                 | Web({url:ssUrl}) => {
-                    if (srcDto.typ != webTypStr 
-                            || srcDto.url != ssUrl 
-                            || srcDto.readInstr->readInstrFromStr != ss.readInstr) {
-                        false
-                    } else {
-                        switch ss.readInstr {
-                            | ReadAll => true
-                            | StopBefore | StopAfter => {
-                                switch ss.label {
-                                    | None => false
-                                    | Some(ssLabel) => ssLabel == srcDto.label
-                                }
-                            }
-                        }
-                    }
+                    srcDto.typ == webTypStr
+                        && ssUrl == srcDto.url
+                        && isReadInstrSame(ss,srcDto)
                 }
             }
         }
@@ -154,11 +186,13 @@ let isScopeSame = (singleScopes: array<mmSingleScope>, srcs: array<mmCtxSrcDto>)
 }
 
 let canLoadContext = (srcs: array<mmCtxSrcDto>):bool => {
-    srcs->Js_array2.length > 0 && srcs->Js_array2.every(src => src.typ == webTypStr)
+    srcs->Js_array2.length > 0 && srcs->Js_array2.every(src => {
+        src.ast->Belt.Option.isSome || src.typ == webTypStr
+    })
 }
 
-let shouldReloadContext = (singleScopes: array<mmSingleScope>, srcs: array<mmCtxSrcDto>):bool => {
-    canLoadContext(srcs) && !isScopeSame(singleScopes, srcs)
+let shouldReloadContext = (singleScopes: array<mmSingleScope>, srcs: array<mmCtxSrcDto>, force:bool):bool => {
+    canLoadContext(srcs) && (force || !isScopeSame(singleScopes, srcs))
 }
 
 let parseMmFileForSingleScope = (st:mmScope, ~singleScopeId:string, ~modalRef:modalRef):promise<mmScope> => {
@@ -174,7 +208,7 @@ let parseMmFileForSingleScope = (st:mmScope, ~singleScopeId:string, ~modalRef:mo
                         | None => raise(MmException({
                             msg:`fileText is not set for the mmSingleScope with id '${singleScopeId}'`
                         }))
-                        | Some(text) => {
+                        | Some(Text(text)) => {
                             let name = getNameFromFileSrc(Some(src))->Belt_Option.getExn
                             let progressText = `Parsing ${name}`
                             promise(rsv => {
@@ -209,6 +243,7 @@ let parseMmFileForSingleScope = (st:mmScope, ~singleScopeId:string, ~modalRef:mo
                                 })->ignore
                             })
                         }
+                        | Some(UseAst) => promise(rsv => rsv(st))
                     }
                 }
             }
@@ -241,6 +276,7 @@ let scopeIsEmpty = (singleScopes: array<mmSingleScope>):bool =>
 
 let loadMmContext = (
     ~singleScopes: array<mmSingleScope>, 
+    ~settings:settings,
     ~modalRef:modalRef,
     ~showError:bool,
 ):promise<result<mmContext,string>> => {
@@ -268,9 +304,14 @@ let loadMmContext = (
                             },
                             stopBefore,
                             stopAfter,
-                            expectedNumOfAssertions: ss.allLabels->Js_array2.indexOf(label) + 1
+                            expectedNumOfAssertions: ss.allLabels->Js_array2.indexOf(label) + 1,
+                            resetNestingLevel:ss.resetNestingLevel,
                         }
                     }),
+                    ~descrRegexToDisc=settings.descrRegexToDisc,
+                    ~labelRegexToDisc=settings.labelRegexToDisc,
+                    ~descrRegexToDepr=settings.descrRegexToDepr,
+                    ~labelRegexToDepr=settings.labelRegexToDepr,
                     ~onProgress = pct => 
                         updateModal( modalRef, modalId, () => rndProgress(~text=progressText, ~pct, ~onTerminate, ())),
                     ~onDone = ctx => {
@@ -301,7 +342,7 @@ let loadMmContext = (
                         }
                         rsv(ctx)
                         closeModal(modalRef, modalId)
-                    }
+                    },
                 )
             })->ignore
         }
@@ -346,28 +387,34 @@ let rec loadMmFileTextForSingleScope = (
         promise(rslv => rslv(Ok(mmScope)))
     } else {
         let ss = mmScope.singleScopes[ssIdx]
+        let continue = (text:fileText):promise<result<mmScope,string>> => {
+            let mmScope = mmScope->updateSingleScope(ss.id, setFileText(_,Some(text)))
+            loadMmFileTextForSingleScope(
+                ~mmScope,
+                ~modalRef,
+                ~trustedUrls,
+                ~onUrlBecomesTrusted,
+                ~loadedTexts,
+                ~ssIdx = ssIdx + 1,
+            )
+        }
+
         switch ss.fileSrc {
             | None => raise(MmException({msg:`Cannot load MM file text for a None fileSrc.`}))
-            | Some(Local(_)) => raise(MmException({msg:`Cannot load MM file text for a Local fileSrc.`}))
-            | Some(Web({alias,url})) => {
-                let continue = (text:string):promise<result<mmScope,string>> => {
-                    let mmScope = mmScope->updateSingleScope(ss.id, setFileText(_,Some(text)))
-                    loadMmFileTextForSingleScope(
-                        ~mmScope,
-                        ~modalRef,
-                        ~trustedUrls,
-                        ~onUrlBecomesTrusted,
-                        ~loadedTexts,
-                        ~ssIdx = ssIdx + 1,
-                    )
+            | Some(Local(_)) => {
+                switch ss.ast {
+                    | None => raise(MmException({msg:`Cannot load MM file text for a Local fileSrc.`}))
+                    | Some(_) => continue(UseAst)
                 }
+            }
+            | Some(Web({alias,url})) => {
                 switch loadedTexts->Belt_HashMapString.get(url) {
-                    | Some(text) => continue(text)
+                    | Some(text) => continue(Text(text))
                     | None => {
                         loadMmFileText( ~modalRef, ~trustedUrls, ~onUrlBecomesTrusted, ~alias, ~url, )->promiseFlatMap(res => {
                             switch res {
                                 | Error(msg) => promise(rslv => rslv(Error(msg)))
-                                | Ok(text) => continue(text)
+                                | Ok(text) => continue(Text(text))
                             }
                         })
                     }
@@ -378,9 +425,9 @@ let rec loadMmFileTextForSingleScope = (
 }
 
 let srcDtoToFileSrc = (~src:mmCtxSrcDto, ~webSrcSettings:array<webSrcSettings>):mmFileSource => {
-    if (src.typ != webTypStr) {
-        raise(MmException({msg:`Cannot convert a non-Web mmCtxSrcDto to a mmFileSource.`}))
-    } else {
+    if (src.typ == localTypStr) {
+        Local({ fileName:src.fileName, })
+    } else if (src.typ == webTypStr) {
         Web({
             alias: switch webSrcSettings->Js_array2.find(ws => ws.url == src.url) {
                 | Some({alias}) => {
@@ -394,6 +441,8 @@ let srcDtoToFileSrc = (~src:mmCtxSrcDto, ~webSrcSettings:array<webSrcSettings>):
             },
             url: src.url
         })
+    } else {
+        raise(MmException({msg:`Cannot convert an mmCtxSrcDto to an mmFileSource.`}))
     }
 }
 
@@ -407,12 +456,14 @@ let makeMmScopeFromSrcDtos = (
 ):promise<result<mmScope,string>> => {
     let mmScope = srcs->Js_array2.reduce(
         (mmScope, src) => {
-            let mmScope = mmScope->addSingleScope(~defaultSrcType=Web)
+            let mmScope = mmScope->addSingleScope(~defaultSrcType=src.typ->mmFileSourceTypeFromStr)
             let ssId = mmScope.singleScopes[mmScope.singleScopes->Js_array2.length-1].id
-            let mmScope = mmScope->updateSingleScope( ssId,setSrcType(_,Web) )
             let mmScope = mmScope->updateSingleScope( ssId,setFileSrc(_,Some(srcDtoToFileSrc(~src, ~webSrcSettings))) )
+            let mmScope = mmScope->updateSingleScope( ssId,setAst(_,src.ast->Belt_Option.map(ast => Ok(ast))))
+            let mmScope = mmScope->updateSingleScope( ssId,setAllLabels(_,src.allLabels))
             let mmScope = mmScope->updateSingleScope( ssId,setReadInstr(_,src.readInstr->readInstrFromStr))
             let mmScope = mmScope->updateSingleScope( ssId,setLabel(_,Some(src.label)))
+            let mmScope = mmScope->updateSingleScope( ssId,setResetNestingLevel(_,src.resetNestingLevel))
             mmScope
         },
         {
@@ -437,23 +488,23 @@ let makeMmScopeFromSrcDtos = (
     })
 }
 
-let defaultSrcTypeStrLocStorKey = "ctx-selector-default-src-type"
+let defaultValueOfDefaultSrcTypeStr = Web->mmFileSourceTypeToStr
 
 @react.component
 let make = (
     ~modalRef:modalRef,
-    ~webSrcSettings:array<webSrcSettings>,
+    ~settings:settings,
     ~onUrlBecomesTrusted:string=>unit,
     ~onChange:(array<mmCtxSrcDto>, mmContext)=>unit, 
-    ~reloadCtx: React.ref<Js.Nullable.t<array<mmCtxSrcDto> => promise<result<unit,string>>>>,
+    ~reloadCtx: React.ref<Js.Nullable.t<reloadCtxFunc>>,
+    ~style as _ :option<reStyle>=?,
+    ~onExpandedChange:bool=>unit,
+    ~doToggle: React.ref<Js.Nullable.t<unit=>unit>>,
 ) => {
-    let (defaultSrcTypeStr, setDefaultSrcTypeStrPriv) = React.useState(() => {
-        locStorReadString(defaultSrcTypeStrLocStorKey)->Belt_Option.getWithDefault(Web->mmFileSourceTypeToStr)
-    })
-    let setDefaultSrcTypeStr = (defaultSrcTypeStr:string):unit => {
-        locStorWriteString(defaultSrcTypeStrLocStorKey, defaultSrcTypeStr)
-        setDefaultSrcTypeStrPriv(_ => defaultSrcTypeStr)
-    }
+    let (defaultSrcTypeStr, setDefaultSrcTypeStr) = useStateFromLocalStorageStr(
+        ~key="ctx-selector-default-src-type", ~default=defaultValueOfDefaultSrcTypeStr
+    )
+
     let defaultSrcType = mmFileSourceTypeFromStrOpt(defaultSrcTypeStr)->Belt_Option.getWithDefault(Web)
 
     let (state, setState) = React.useState(() => createInitialMmScope(~defaultSrcType))
@@ -473,21 +524,26 @@ let make = (
         onChange(srcs,ctx)
     }
 
-    let trustedUrls= webSrcSettings->Js_array2.filter(s => s.trusted)->Js_array2.map(s => s.url)
+    let trustedUrls= settings.webSrcSettings->Js_array2.filter(s => s.trusted)->Js_array2.map(s => s.url)
 
     let actParseMmFileText = (id:string, src:mmFileSource, text:string):unit => {
         let st = state->updateSingleScope(id,setFileSrc(_,Some(src)))
-        let st = st->updateSingleScope(id,setFileText(_,Some(text)))
+        let st = st->updateSingleScope(id,setFileText(_,Some(Text(text))))
         st->parseMmFileForSingleScope(~singleScopeId=id, ~modalRef)->promiseMap(st => setState(_ => st))->ignore
     }
 
-    let toggleAccordion = () => {
+    let actToggleAccordion = () => {
         setState(prev => prev->setExpanded(!prev.expanded))
     }
     
-    let closeAccordion = () => {
+    let actCloseAccordion = () => {
         setState(setExpanded(_, false))
     }
+
+    React.useEffect1(() => {
+        onExpandedChange(state.expanded)
+        None
+    }, [state.expanded])
 
     let rndSingleScopeSelectors = () => {
         let renderDeleteButton = state.singleScopes->Js.Array2.length > 1 || state.singleScopes[0].fileSrc->Belt_Option.isSome
@@ -496,7 +552,7 @@ let make = (
                 key=singleScope.id
                 modalRef
                 availableWebSrcs={
-                    webSrcSettings
+                    settings.webSrcSettings
                         ->Js_array2.filter(s => s.alias->Js_string2.trim->Js_string2.length > 0)
                         ->Js_array2.map(s => {
                             {
@@ -510,7 +566,7 @@ let make = (
                 srcType=singleScope.srcType
                 onSrcTypeChange={srcType => {
                     if (state.singleScopes->Js.Array2.length == 1) {
-                        setDefaultSrcTypeStr(srcType->mmFileSourceTypeToStr)
+                        setDefaultSrcTypeStr(_ => srcType->mmFileSourceTypeToStr)
                     }
                     setState(updateSingleScope(_,singleScope.id,setSrcType(_,srcType)))
                 }}
@@ -549,7 +605,7 @@ let make = (
         }
     }
 
-    let applyChanges = (~state:mmScope, ~showError:bool):promise<result<unit,string>> => {
+    let applyChanges = ( ~state:mmScope, ~showError:bool, ~settings:settings, ):promise<result<unit,string>> => {
         if (scopeIsEmpty(state.singleScopes)) {
             promise(rslv => {
                 setState(_ => state)
@@ -557,7 +613,12 @@ let make = (
                 rslv(Ok(()))
             })
         } else {
-            loadMmContext(~singleScopes=state.singleScopes, ~modalRef, ~showError)->promiseMap(res => {
+            loadMmContext(
+                ~singleScopes=state.singleScopes, 
+                ~settings,
+                ~modalRef, 
+                ~showError
+            )->promiseMap(res => {
                 switch res {
                     | Error(msg) => Error(msg)
                     | Ok(ctx) => {
@@ -565,6 +626,10 @@ let make = (
                             switch ss.fileSrc {
                                 | None => raise(MmException({msg:`ss.fileSrc is None`}))
                                 | Some(src) => {
+                                    let ast = switch ss.ast {
+                                        | Some(Ok(ast)) => Some(ast)
+                                        | _ => raise(MmException({msg:`Cannot create mmCtxSrcDto from empty ast.`}))
+                                    }
                                     switch src {
                                         | Local({fileName}) => {
                                             {
@@ -573,6 +638,9 @@ let make = (
                                                 url:"",
                                                 readInstr: ss.readInstr->readInstrToStr,
                                                 label: ss.label->Belt.Option.getWithDefault(""),
+                                                ast,
+                                                allLabels: ss.allLabels,
+                                                resetNestingLevel: ss.resetNestingLevel,
                                             }
                                         }
                                         | Web({ url, }) => {
@@ -582,6 +650,9 @@ let make = (
                                                 url,
                                                 readInstr: ss.readInstr->readInstrToStr,
                                                 label: ss.label->Belt.Option.getWithDefault(""),
+                                                ast,
+                                                allLabels: ss.allLabels,
+                                                resetNestingLevel: ss.resetNestingLevel,
                                             }
                                         }
                                     }
@@ -598,8 +669,8 @@ let make = (
     }
 
     reloadCtx.current = Js.Nullable.return(
-        (srcs: array<mmCtxSrcDto>):promise<result<unit,string>> => {
-            if (!shouldReloadContext(prevState.singleScopes, srcs)) {
+        (~srcs:array<mmCtxSrcDto>, ~settings:settings, ~force:bool=false, ~showError:bool=false, ()):promise<result<unit,string>> => {
+            if (!shouldReloadContext(prevState.singleScopes, srcs, force)) {
                 promise(rslv => rslv(Ok(())))
             } else {
                 let loadedTexts = Belt_HashMapString.fromArray(
@@ -608,8 +679,8 @@ let make = (
                             | None | Some(Local(_)) => None
                             | Some(Web({url})) => {
                                 switch ss.fileText {
-                                    | None => None
-                                    | Some(text) => Some((url,text))
+                                    | None | Some(UseAst) => None
+                                    | Some(Text(text)) => Some((url,text))
                                 }
                             }
                             
@@ -618,7 +689,7 @@ let make = (
                 )
                 makeMmScopeFromSrcDtos(
                     ~modalRef,
-                    ~webSrcSettings,
+                    ~webSrcSettings=settings.webSrcSettings,
                     ~srcs,
                     ~trustedUrls,
                     ~onUrlBecomesTrusted,
@@ -626,12 +697,14 @@ let make = (
                 )->promiseFlatMap(res => {
                     switch res {
                         | Error(msg) => promise(rslv => rslv(Error(msg)))
-                        | Ok(mmScope) => applyChanges(~state=mmScope, ~showError=false)
+                        | Ok(mmScope) => applyChanges( ~state=mmScope, ~showError, ~settings )
                     }
                 })
             }
         }
     )
+
+    doToggle.current = Js.Nullable.return(actToggleAccordion)
 
     let rndSaveButtons = () => {
         let thereAreNoChanges = (scopeIsEmpty(state.singleScopes) && scopeIsEmpty(prevState.singleScopes)) 
@@ -659,12 +732,12 @@ let make = (
             <Row>
                 <Button variant=#contained disabled={!scopeIsCorrect && !scopeIsEmpty} 
                     onClick={_=>{
-                        applyChanges(~state, ~showError=true)->promiseMap(res => {
+                        applyChanges( ~state, ~showError=true, ~settings )->promiseMap(res => {
                             switch res {
                                 | Error(_) => ()
                                 | Ok(_) => {
                                     if (!scopeIsEmpty) {
-                                        closeAccordion()
+                                        actCloseAccordion()
                                     }
                                 }
                             }
@@ -679,7 +752,7 @@ let make = (
 
 
     <Accordion expanded=state.expanded >
-        <AccordionSummaryStyled expandIcon={<MM_Icons.ExpandMore/>} onClick=toggleAccordion >
+        <AccordionSummaryStyled expandIcon={<MM_Icons.ExpandMore/>} onClick=actToggleAccordion >
             {state.loadedContextSummary->React.string}
         </AccordionSummaryStyled>
         <AccordionDetails>
